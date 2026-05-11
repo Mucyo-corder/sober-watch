@@ -9,17 +9,23 @@ dotenv.config({ path: join(__dirname, "../.env") });
 const { Pool } = pg;
 
 // Create connection pool with error handling
-export const pool = new Pool({
-  host: process.env.DB_HOST || "localhost",
-  port: process.env.DB_PORT || 5432,
-  database: process.env.DB_NAME || "soberwatch",
-  user: process.env.DB_USER || "postgres",
-  password: process.env.DB_PASSWORD || "phanie",
-  // Connection pool settings
-  max: 20,                    // Maximum number of clients in the pool
-  idleTimeoutMillis: 30000,   // Close idle clients after 30 seconds
-  connectionTimeoutMillis: 2000, // Timeout for acquiring a new connection
-});
+// Use DATABASE_URL if available (for production), otherwise use individual env vars
+const connectionString = process.env.DATABASE_URL;
+export const pool = new Pool(
+  connectionString
+    ? { connectionString, ssl: { rejectUnauthorized: false } }
+    : {
+        host: process.env.DB_HOST || "localhost",
+        port: process.env.DB_PORT || 5432,
+        database: process.env.DB_NAME || "soberwatch",
+        user: process.env.DB_USER || "postgres",
+        password: process.env.DB_PASSWORD || "phanie",
+        // Connection pool settings
+        max: 20,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 2000,
+      }
+);
 
 // Handle pool errors
 pool.on("error", (err) => {
