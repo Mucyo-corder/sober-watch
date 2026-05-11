@@ -1,0 +1,24 @@
+{
+  "name": "soberwatch-server",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "create-db": "node src/create-db.js",
+    "init-db": "node src/init-db.js",
+    "test-db": "node src/test-db.js",
+    "test-email": "node src/test-email.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.3",
+    "nodemailer": "^7.0.13",
+    "pg": "^8.16.3",
+    "qrcode": "^1.5.4"
+  }
+}
