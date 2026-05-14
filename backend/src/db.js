@@ -1,125 +1,28 @@
 import pg from "pg";
 import dotenv from "dotenv";
-import { fileURLToPath } from "url";
-import { dirname, join } from "path";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-dotenv.config({
-  path: join(__dirname, "../.env"),
-});
+dotenv.config();
 
 const { Pool } = pg;
 
-/* -------------------------------------------------------
-   Helpers
-------------------------------------------------------- */
-
-function firstNonEmpty(...vals) {
-  for (const v of vals) {
-    if (v === undefined || v === null) continue;
-
-    const s = String(v).trim();
-
-    if (s !== "") return s;
-  }
-
-  return "";
+if (!process.env.DATABASE_URL) {
+  throw new Error("DATABASE_URL is missing in environment variables");
 }
 
-function buildDatabaseUrlFromParts() {
-  const host = firstNonEmpty(process.env.DB_HOST);
+export const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
 
-  const port = firstNonEmpty(process.env.DB_PORT, "6543");
+  ssl: {
+    rejectUnauthorized: false,
+  },
 
-  const database = firstNonEmpty(
-    process.env.DB_DATABASE,
-    process.env.DB_NAME,
-    "postgres"
-  );
+  max: 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 15000,
 
-  // IMPORTANT FOR SUPABASE
-  // must be postgres.PROJECT_REF
-  const user = firstNonEmpty(
-    process.env.DB_USERNAME,
-    process.env.DB_USER
-  );
-
-  const password = firstNonEmpty(process.env.DB_PASSWORD);
-
-  if (!host || !user || !password) {
-    return "";
-  }
-
-  return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${database}`;
-}
-
-function resolveConnectionString() {
-  return firstNonEmpty(
-    process.env.DATABASE_URL,
-    process.env.SUPABASE_DB_URL,
-    process.env.POSTGRES_URL,
-    buildDatabaseUrlFromParts()
-  );
-}
-
-function isSupabase(connectionString) {
-  return /supabase\.com/i.test(connectionString || "");
-}
-
-function isTransactionPooler(connectionString) {
-  return /pooler\.supabase\.com:6543/i.test(connectionString || "");
-}
-
-/* -------------------------------------------------------
-   Pool Config
-------------------------------------------------------- */
-
-function getPoolConfig() {
-  const connectionString = resolveConnectionString();
-
-  const baseConfig = {
-    max: 10,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 15000,
-  };
-
-  if (!connectionString) {
-    throw new Error(
-      "DATABASE_URL is missing. Please configure your database connection."
-    );
-  }
-
-  const config = {
-    ...baseConfig,
-    connectionString,
-
-    // REQUIRED FOR SUPABASE
-    ssl: {
-      rejectUnauthorized: false,
-    },
-  };
-
-  // IMPORTANT FOR SUPABASE TRANSACTION POOLER
-  if (isTransactionPooler(connectionString)) {
-    config.max = 1;
-
-    // disable prepared statements
-    config.statement_timeout = 30000;
-    config.query_timeout = 30000;
-
-    // IMPORTANT
-    config.keepAlive = true;
-  }
-
-  return config;
-}
-
-/* -------------------------------------------------------
-   Pool
-------------------------------------------------------- */
-
-export const pool = new Pool(getPoolConfig());
+  // 🔥 IMPORTANT FOR SUPABASE POOLER
+  prepareThreshold: 0,
+});
 
 pool.on("connect", () => {
   console.log("✓ PostgreSQL connected successfully");
@@ -129,54 +32,17 @@ pool.on("error", (err) => {
   console.error("Unexpected PostgreSQL error:", err);
 });
 
-/* -------------------------------------------------------
-   Test Connection
-------------------------------------------------------- */
-
-export async function testConnection(retries = 3, delayMs = 2000) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      console.log(
-        `Testing database connection (attempt ${attempt}/${retries})...`
-      );
-
-      const result = await pool.query("SELECT NOW()");
-
-      console.log(
-        "✓ Database connection successful:",
-        result.rows[0]
-      );
-
-      return true;
-    } catch (err) {
-      console.error(
-        `✗ Connection failed (attempt ${attempt}/${retries}):`,
-        err.message
-      );
-
-      if (attempt < retries) {
-        console.log(`Retrying in ${delayMs}ms...`);
-
-        await new Promise((resolve) =>
-          setTimeout(resolve, delayMs)
-        );
-      }
-    }
+export async function testConnection() {
+  try {
+    const result = await pool.query("SELECT NOW()");
+    console.log("✓ DB OK:", result.rows[0]);
+    return true;
+  } catch (err) {
+    console.error("DB connection failed:", err.message);
+    return false;
   }
-
-  return false;
 }
 
-/* -------------------------------------------------------
-   Close Pool
-------------------------------------------------------- */
-
 export async function closePool() {
-  try {
-    await pool.end();
-
-    console.log("✓ Database pool closed");
-  } catch (err) {
-    console.error("Error closing pool:", err);
-  }
+  await pool.end();
 }
