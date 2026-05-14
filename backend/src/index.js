@@ -78,28 +78,12 @@ function parseOriginList(envValue) {
     .filter(Boolean);
 }
 
+// All explicit CORS origins come from env (comma-separated, no trailing slashes). See backend/.env.example.
 const allowedOrigins = [
+  ...parseOriginList(process.env.CORS_ALLOWED_ORIGINS),
   ...parseOriginList(process.env.CLIENT_ORIGINS),
   ...parseOriginList(process.env.ALLOWED_ORIGINS),
   process.env.CLIENT_ORIGIN,
-  "http://localhost:8080",
-  "http://localhost:8081",
-  "http://localhost:8082",
-  "http://localhost:8083",
-  "http://localhost:8084",
-  "http://localhost:8085",
-  "http://localhost:5173",
-  "http://127.0.0.1:8080",
-  "http://127.0.0.1:8081",
-  "http://127.0.0.1:8082",
-  "http://127.0.0.1:8083",
-  "http://127.0.0.1:8084",
-  "http://127.0.0.1:8085",
-  "http://127.0.0.1:5173",
-  "http://127.0.0.1:54670",
-  "https://sober-watch.onrender.com",
-  "https://frontend.onrender.com",
-  "https://frontend-9wly.onrender.com",
 ].filter(Boolean);
 
 function isAllowedCorsOrigin(origin) {
@@ -965,16 +949,15 @@ app.get("/api/notifications", async (_req, res) => {
   }
 });
 
-// Must be registered before /api/notifications/:id — otherwise "status" is captured as :id (400).
-app.get("/api/notifications/status", async (_req, res) => {
-  return res.json({ configured: isEmailConfigured() });
-});
-
-// Get a single notification setting by ID
-app.get("/api/notifications/:id", async (req, res) => {
-  const id = Number.parseInt(String(req.params.id), 10);
+// "status" → email config; numeric segment → row by id (one route so "status" is never parsed as id).
+app.get("/api/notifications/:segment", async (req, res) => {
+  const segment = String(req.params.segment ?? "");
+  if (segment === "status") {
+    return res.json({ configured: isEmailConfigured() });
+  }
+  const id = Number.parseInt(segment, 10);
   if (Number.isNaN(id)) {
-    return res.status(400).json({ error: "Invalid notification id" });
+    return res.status(404).json({ error: "Not found" });
   }
   try {
     const result = await pool.query(
@@ -1014,10 +997,11 @@ app.post("/api/notifications", async (req, res) => {
 
 // Update a notification setting (public for testing)
 app.patch("/api/notifications/:id", async (req, res) => {
-  const id = Number.parseInt(String(req.params.id), 10);
-  if (Number.isNaN(id)) {
-    return res.status(400).json({ error: "Invalid notification id" });
+  const idStr = String(req.params.id ?? "");
+  if (!/^\d+$/.test(idStr)) {
+    return res.status(404).json({ error: "Not found" });
   }
+  const id = Number.parseInt(idStr, 10);
   const { device_id, email, alert_types, enabled } = req.body ?? {};
   try {
     const existing = await pool.query("SELECT * FROM notification_settings WHERE id = $1", [id]);
@@ -1063,10 +1047,11 @@ app.patch("/api/notifications/:id", async (req, res) => {
 
 // Delete a notification setting (public for testing)
 app.delete("/api/notifications/:id", async (req, res) => {
-  const id = Number.parseInt(String(req.params.id), 10);
-  if (Number.isNaN(id)) {
-    return res.status(400).json({ error: "Invalid notification id" });
+  const idStr = String(req.params.id ?? "");
+  if (!/^\d+$/.test(idStr)) {
+    return res.status(404).json({ error: "Not found" });
   }
+  const id = Number.parseInt(idStr, 10);
   try {
     const result = await pool.query("DELETE FROM notification_settings WHERE id = $1 RETURNING id", [id]);
     if (result.rows.length === 0) {
