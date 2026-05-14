@@ -10,15 +10,16 @@ dotenv.config({ path: join(__dirname, "../.env") });
 const SMTP_HOST = process.env.SMTP_HOST || "";
 const SMTP_PORT = Number(process.env.SMTP_PORT) || 587;
 const SMTP_SECURE = process.env.SMTP_SECURE === "true";
-const SMTP_USER = process.env.SMTP_USER || "mucyophanie3@gmail.com";
-const SMTP_PASS = process.env.SMTP_PASS || "mobv nnzo fzss btpz";
+const SMTP_USER = process.env.SMTP_USER || "";
+const SMTP_PASS = process.env.SMTP_PASS || "";
 const EMAIL_FROM = process.env.EMAIL_FROM || "soberwatch@localhost";
-const DEFAULT_ALERT_EMAIL = process.env.DEFAULT_ALERT_EMAIL || "mucyophanie3@gmail.com";
+/** Optional extra recipient when SMTP is configured (set in .env only; never hardcode) */
+const DEFAULT_ALERT_EMAIL = (process.env.DEFAULT_ALERT_EMAIL || "").trim();
 
 let transporter = null;
 
 function getTransporter() {
-  if (!SMTP_HOST) return null;
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) return null;
   if (transporter) return transporter;
 
   transporter = nodemailer.createTransport({
@@ -35,7 +36,7 @@ function getTransporter() {
 }
 
 export function isEmailConfigured() {
-  return !!SMTP_HOST;
+  return !!(SMTP_HOST && SMTP_USER && SMTP_PASS);
 }
 
 export async function sendAlertEmail(deviceId, alcoholLevel, status, baselineMean, baselineDeviation) {
@@ -45,10 +46,8 @@ export async function sendAlertEmail(deviceId, alcoholLevel, status, baselineMea
     return;
   }
 
-  // Collect recipient emails: DB settings + static default email
   const emailSet = new Set();
 
-  // Always include the default static alert email if configured
   if (DEFAULT_ALERT_EMAIL) {
     emailSet.add(DEFAULT_ALERT_EMAIL);
   }

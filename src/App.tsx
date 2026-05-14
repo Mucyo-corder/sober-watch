@@ -5,53 +5,31 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import Index from "./pages/Index.tsx";
 import Setup from "./pages/Setup.tsx";
-import Auth from "./pages/Auth.tsx";
-import AuthQR from "./pages/AuthQR.tsx";
 import PublicView from "./pages/PublicView.tsx";
 import AuditLog from "./pages/AuditLog.tsx";
 import NotFound from "./pages/NotFound.tsx";
-import { ProtectedRoute } from "./components/ProtectedRoute.tsx";
 
 const queryClient = new QueryClient();
 
 const App = () => (
   <QueryClientProvider client={queryClient}>
-    <TooltipProvider>
-      <Toaster />
-      <Sonner position="top-right" richColors />
-      <BrowserRouter>
-        <Routes>
-          <Route path="/auth" element={<Auth />} />
-          <Route path="/auth/qr" element={<AuthQR />} />
-          <Route path="/public-view" element={<PublicView />} />
-          <Route
-            path="/"
-            element={
-              <ProtectedRoute>
-                <Index />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/setup"
-            element={
-              <ProtectedRoute>
-                <Setup />
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/audit"
-            element={
-              <ProtectedRoute>
-                <AuditLog />
-              </ProtectedRoute>
-            }
-          />
-          <Route path="*" element={<NotFound />} />
-        </Routes>
-      </BrowserRouter>
-    </TooltipProvider>
+    <div className="h-full min-h-0">
+      <TooltipProvider>
+        <Toaster />
+        <Sonner position="top-right" richColors />
+        <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+          <div className="h-full min-h-0">
+            <Routes>
+              <Route path="/public-view" element={<PublicView />} />
+              <Route path="/" element={<Index />} />
+              <Route path="/setup" element={<Setup />} />
+              <Route path="/audit" element={<AuditLog />} />
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </div>
+        </BrowserRouter>
+      </TooltipProvider>
+    </div>
   </QueryClientProvider>
 );
 

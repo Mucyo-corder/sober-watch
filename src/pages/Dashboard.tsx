@@ -1,28 +1,24 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   Activity,
   AlertTriangle,
   Download,
-  Wifi,
-  WifiOff,
-  Cpu,
   Printer,
-  LogOut,
   Trash2,
   History,
   Bell,
-  Shield,
   Mail,
   Brain,
   RefreshCw,
   Plus,
   X,
   Send,
+  FileText,
+  BarChart3,
 } from "lucide-react";
 import { AlcoholStatus, statusColorClasses, formatAlcoholLevel, formatAlcoholPercentage } from "@/lib/alcohol";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -32,18 +28,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { StatusBadge } from "@/components/StatusBadge";
-import {
   ResponsiveContainer,
-  LineChart,
-  Line,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -51,11 +36,16 @@ import {
   ReferenceLine,
   BarChart,
   Bar,
+  PieChart,
+  Pie,
+  Cell,
+  Area,
+  AreaChart,
 } from "recharts";
 import { toast } from "sonner";
 import { format } from "date-fns";
 import jsPDF from "jspdf";
-import { useAuth } from "@/hooks/useAuth";
+import { apiUrl } from "@/lib/apiBase";
 import {
   Dialog,
   DialogContent,
@@ -65,6 +55,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
+import { DashboardShell, type ShellNavId } from "@/components/DashboardShell";
 
 interface AlcoholLog {
   id: number;
@@ -73,8 +64,6 @@ interface AlcoholLog {
   status: AlcoholStatus;
   timestamp: string;
 }
-
-const SINGLE_DEVICE_ID = "DEVICE-001";
 
 interface Baseline {
   device_id: string;
@@ -95,16 +84,99 @@ interface NotificationSetting {
   created_at: string;
 }
 
+interface StatusBucket {
+  SAFE: number;
+  WARNING: number;
+  DANGER: number;
+  total: number;
+}
+
+/** Shape used by the report cards (weekly API or monthly data normalized to this). */
+interface ReportDashboardData {
+  overall: StatusBucket;
+  perDevice: Record<string, StatusBucket>;
+}
+
+interface MonthlyReportApiResponse {
+  year: number;
+  perMonth: Record<string, { devices: Record<string, StatusBucket>; overall: StatusBucket }>;
+}
+
+function normalizeMonthlyReportForDashboard(data: MonthlyReportApiResponse): ReportDashboardData {
+  const overall: StatusBucket = { SAFE: 0, WARNING: 0, DANGER: 0, total: 0 };
+  const perDevice: Record<string, StatusBucket> = {};
+  for (const monthData of Object.values(data.perMonth)) {
+    overall.SAFE += monthData.overall.SAFE;
+    overall.WARNING += monthData.overall.WARNING;
+    overall.DANGER += monthData.overall.DANGER;
+    overall.total += monthData.overall.total;
+    for (const [dev, counts] of Object.entries(monthData.devices)) {
+      if (!perDevice[dev]) {
+        perDevice[dev] = { SAFE: 0, WARNING: 0, DANGER: 0, total: 0 };
+      }
+      perDevice[dev].SAFE += counts.SAFE;
+      perDevice[dev].WARNING += counts.WARNING;
+      perDevice[dev].DANGER += counts.DANGER;
+      perDevice[dev].total += counts.total;
+    }
+  }
+  return { overall, perDevice };
+}
+
+interface AlcoholAlertRow {
+  id: number;
+  device_id: string;
+  alcohol_level: number;
+  status: AlcoholStatus;
+  acknowledged?: boolean;
+  created_at: string;
+  archived_at?: string;
+}
+
+/** Normalize API rows so id/enabled/alert_types work with React state and PATCH/DELETE. */
+function normalizeNotificationRow(raw: NotificationSetting): NotificationSetting {
+  const id = Number(raw.id);
+  const types = Array.isArray(raw.alert_types) ? raw.alert_types : ["WARNING", "DANGER"];
+  return {
+    ...raw,
+    id: Number.isFinite(id) ? id : 0,
+    alert_types: types,
+    enabled: raw.enabled !== false,
+  };
+}
+
+function parseApiErrorText(text: string, status: number): string {
+  try {
+    const j = JSON.parse(text) as { detail?: string; error?: string };
+    return j.detail || j.error || text || `HTTP ${status}`;
+  } catch {
+    return text || `HTTP ${status}`;
+  }
+}
+
 export default function Dashboard() {
-  const navigate = useNavigate();
-  const { user, signOut } = useAuth();
+  const [searchParams] = useSearchParams();
+  const section = useMemo(() => {
+    const s = searchParams.get("section");
+    if (s === "reports" || s === "alerts" || s === "devices") return s;
+    return "home";
+  }, [searchParams]);
+
   const [logs, setLogs] = useState<AlcoholLog[]>([]);
   const [loadingLogs, setLoadingLogs] = useState(true);
   const [realtimeOn, setRealtimeOn] = useState(false);
   const [highAlertId, setHighAlertId] = useState<number | null>(null);
-  const [alerts, setAlerts] = useState<any[]>([]);
-  const [historyAlerts, setHistoryAlerts] = useState<any[]>([]);
+  const [alerts, setAlerts] = useState<AlcoholAlertRow[]>([]);
+  const [historyAlerts, setHistoryAlerts] = useState<AlcoholAlertRow[]>([]);
   const [alertView, setAlertView] = useState<"active" | "history">("active");
+
+  // Report state
+  const [reportPeriod, setReportPeriod] = useState<"weekly" | "monthly">("weekly");
+  const [reportYear, setReportYear] = useState<number>(new Date().getFullYear());
+  const [reportMonth, setReportMonth] = useState<number>(new Date().getMonth() + 1);
+  const [reportDevice, setReportDevice] = useState<string>("all");
+  const [reportData, setReportData] = useState<ReportDashboardData | null>(null);
+  const [loadingReport, setLoadingReport] = useState(false);
 
   // Filters
   const [deviceFilter, setDeviceFilter] = useState<string>("all");
@@ -112,7 +184,9 @@ export default function Dashboard() {
   const [dateTo, setDateTo] = useState<string>("");
   const [searchTriggered, setSearchTriggered] = useState<number>(0);
 
-  // Baseline auto-learning
+  // Report state setters inside component to avoid hook issues
+  // Already defined above
+
   const [baselines, setBaselines] = useState<Baseline[]>([]);
   const [emailConfigured, setEmailConfigured] = useState(false);
 
@@ -122,12 +196,41 @@ export default function Dashboard() {
   const [newEmail, setNewEmail] = useState("");
   const [newEmailDevice, setNewEmailDevice] = useState("all");
   const [newEmailTypes, setNewEmailTypes] = useState<string[]>(["WARNING", "DANGER"]);
+  const [trendChartKind, setTrendChartKind] = useState<"line" | "bar">("line");
+
+  /** Background poll passes `false` so the button / spinner are not stuck loading. */
+  const fetchReport = useCallback(async (showLoading = false) => {
+    if (showLoading) setLoadingReport(true);
+    try {
+      const params = new URLSearchParams();
+      params.append("year", String(reportYear));
+      if (reportPeriod === "weekly") {
+        params.append("month", String(reportMonth));
+      }
+      if (reportDevice !== "all") {
+        params.append("device", reportDevice);
+      }
+      const res = await fetch(apiUrl(`/api/reports/${reportPeriod}?${params.toString()}`));
+      if (res.ok) {
+        const raw = (await res.json()) as ReportDashboardData | MonthlyReportApiResponse;
+        if (reportPeriod === "weekly") {
+          setReportData(raw as ReportDashboardData);
+        } else {
+          setReportData(normalizeMonthlyReportForDashboard(raw as MonthlyReportApiResponse));
+        }
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      if (showLoading) setLoadingReport(false);
+    }
+  }, [reportYear, reportMonth, reportPeriod, reportDevice]);
 
   useEffect(() => {
     let mounted = true;
     const fetchLogs = async () => {
       try {
-        const response = await fetch(`${import.meta.env.VITE_API_BASE_URL}/api/logs`);
+        const response = await fetch(apiUrl("/api/logs"));
         if (!response.ok) throw new Error("Failed to fetch");
         const data = (await response.json()) as AlcoholLog[];
         if (!mounted) return;
@@ -136,18 +239,22 @@ export default function Dashboard() {
             const row = data[0];
             if (row.status === "DANGER") {
               setHighAlertId(row.id);
-              toast.error(`DANGER alcohol detected on ${row.device_id} — ${formatAlcoholLevel(row.alcohol_level)} (${formatAlcoholPercentage(row.alcohol_level)})`, {
-                duration: 2000,
-              });
+              toast.error(
+                `DANGER alcohol detected on ${row.device_id} — ${formatAlcoholLevel(row.alcohol_level)} (${formatAlcoholPercentage(row.alcohol_level)})`,
+                { duration: 2000 }
+              );
               // Auto-send gas alert email
               const gasValue = Math.round(Number(row.alcohol_level) * 10000);
-              fetch(`${import.meta.env.VITE_API_BASE_URL}/api/alert`, {
+              fetch(apiUrl("/api/alert"), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ gasValue }),
               }).catch(() => {});
             } else if (row.status === "WARNING") {
-              toast.warning(`Warning level on ${row.device_id} — ${formatAlcoholLevel(row.alcohol_level)} (${formatAlcoholPercentage(row.alcohol_level)})`, { duration: 2000 });
+              toast.warning(
+                `Warning level on ${row.device_id} — ${formatAlcoholLevel(row.alcohol_level)} (${formatAlcoholPercentage(row.alcohol_level)})`,
+                { duration: 2000 }
+              );
             }
           }
           return data.length > 0 ? data.slice(0, 500) : prev;
@@ -162,14 +269,15 @@ export default function Dashboard() {
       }
     };
 
+
     const fetchAlerts = async () => {
       try {
         const [activeRes, historyRes] = await Promise.all([
-          fetch(`${import.meta.env.VITE_API_BASE_URL}/api/alerts`),
-          fetch(`${import.meta.env.VITE_API_BASE_URL}/api/alerts/history`),
+          fetch(apiUrl("/api/alerts")),
+          fetch(apiUrl("/api/alerts/history")),
         ]);
-        if (activeRes.ok) setAlerts(await activeRes.json());
-        if (historyRes.ok) setHistoryAlerts(await historyRes.json());
+        if (activeRes.ok) setAlerts((await activeRes.json()) as AlcoholAlertRow[]);
+        if (historyRes.ok) setHistoryAlerts((await historyRes.json()) as AlcoholAlertRow[]);
       } catch {
         /* ignore */
       }
@@ -177,44 +285,60 @@ export default function Dashboard() {
 
     const fetchBaselines = async () => {
       try {
-        const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/api/baselines`);
+        const res = await fetch(apiUrl("/api/baselines"));
         if (res.ok) setBaselines(await res.json());
       } catch {
         /* ignore */
       }
     };
 
-    const fetchNotifications = async () => {
-      try {
-        const [notifRes, statusRes] = await Promise.all([
-          fetch(`${import.meta.env.VITE_API_BASE_URL}/api/notifications`),
-          fetch(`${import.meta.env.VITE_API_BASE_URL}/api/notifications/status`),
-        ]);
-        if (notifRes.ok) setNotifications(await notifRes.json());
-        if (statusRes.ok) {
-          const data = await statusRes.json();
-          setEmailConfigured(data.configured);
-        }
-      } catch {
-        /* ignore */
-      }
-    };
+     const fetchNotifications = async () => {
+       try {
+         const [notifRes, statusRes] = await Promise.all([
+           fetch(apiUrl("/api/notifications")),
+           fetch(apiUrl("/api/notifications/status")),
+         ]);
+         if (notifRes.ok) {
+           const rows = (await notifRes.json()) as NotificationSetting[];
+           setNotifications(rows.map(normalizeNotificationRow));
+         }
+         if (statusRes.ok) {
+           const data = await statusRes.json();
+           setEmailConfigured(data.configured);
+         }
+       } catch {
+         /* ignore */
+       }
+     };
 
-    fetchLogs();
-    fetchAlerts();
-    fetchBaselines();
-    fetchNotifications();
-    const intervalId = window.setInterval(() => {
-      fetchLogs();
-      fetchAlerts();
-      fetchBaselines();
+     fetchLogs();
+     fetchAlerts();
+     fetchBaselines();
+     fetchNotifications();
+     fetchReport();
+     const intervalId = window.setInterval(() => {
+       fetchLogs();
+       fetchAlerts();
+       fetchBaselines();
+       fetchNotifications();
+       fetchReport();
     }, 2000);
 
     return () => {
       mounted = false;
       window.clearInterval(intervalId);
     };
-  }, []);
+  }, [fetchReport]);
+
+  const shellNav: ShellNavId = useMemo(() => {
+    if (section === "alerts") return "alerts";
+    if (section === "reports") return "reports";
+    if (section === "devices") return "devices";
+    return "dashboard";
+  }, [section]);
+
+  const crumbLabel =
+    section === "reports" ? "Reports" : section === "alerts" ? "Alerts" : section === "devices" ? "Devices" : "Dashboard";
 
   const devices = useMemo(
     () => Array.from(new Set(logs.map((l) => l.device_id))).sort(),
@@ -234,7 +358,6 @@ export default function Dashboard() {
   }, [logs, deviceFilter, dateFrom, dateTo, searchTriggered]);
 
   const latest = filtered[0];
-  const latestStatusColor = latest ? statusColorClasses(latest.status) : null;
 
   const stats = useMemo(() => {
     const total = filtered.length;
@@ -251,6 +374,7 @@ export default function Dashboard() {
       .map((l) => ({
         time: format(new Date(l.timestamp), "HH:mm:ss"),
         level: Number(l.alcohol_level),
+        bacPct: Number(l.alcohol_level) * 100,
         device: l.device_id,
       }));
   }, [filtered]);
@@ -291,7 +415,7 @@ export default function Dashboard() {
   async function handleDeleteLog(id: number) {
     if (!confirm("Are you sure you want to delete this log?")) return;
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL}/api/logs/${id}`, { method: "DELETE" });
+      const response = await fetch(apiUrl(`/api/logs/${id}`), { method: "DELETE" });
       if (!response.ok) throw new Error("Failed to delete log");
       setLogs((prev) => prev.filter((l) => l.id !== id));
       toast.success("Log deleted");
@@ -303,7 +427,7 @@ export default function Dashboard() {
   async function handleDeleteAll() {
     if (!confirm("Are you sure you want to delete ALL logs? This cannot be undone.")) return;
     try {
-      const response = await fetch(`${import.meta.env.VITE_API_BASE_URL}/api/logs`, { method: "DELETE" });
+      const response = await fetch(apiUrl("/api/logs"), { method: "DELETE" });
       if (!response.ok) throw new Error("Failed to clear logs");
       setLogs([]);
       toast.success("All logs deleted");
@@ -322,13 +446,17 @@ export default function Dashboard() {
       return;
     }
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/api/notifications`, {
+      const res = await fetch(apiUrl("/api/notifications"), {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({ device_id: newEmailDevice, email: newEmail.trim(), alert_types: newEmailTypes }),
       });
-      if (!res.ok) throw new Error("Failed to add notification");
-      const setting = await res.json();
+      const text = await res.text();
+      if (!res.ok) {
+        toast.error(parseApiErrorText(text, res.status));
+        return;
+      }
+      const setting = normalizeNotificationRow(JSON.parse(text) as NotificationSetting);
       setNotifications((prev) => [...prev, setting]);
       setNewEmail("");
       setNewEmailDevice("all");
@@ -341,12 +469,16 @@ export default function Dashboard() {
 
   async function handleDeleteNotification(id: number) {
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/api/notifications/${id}`, {
+      const res = await fetch(apiUrl(`/api/notifications/${id}`), {
         method: "DELETE",
         headers: authHeaders(),
       });
-      if (!res.ok) throw new Error("Failed to delete notification");
-      setNotifications((prev) => prev.filter((n) => n.id !== id));
+      const text = await res.text();
+      if (!res.ok) {
+        toast.error(parseApiErrorText(text, res.status));
+        return;
+      }
+      setNotifications((prev) => prev.filter((n) => Number(n.id) !== Number(id)));
       toast.success("Email alert removed");
     } catch {
       toast.error("Failed to remove email alert");
@@ -355,13 +487,18 @@ export default function Dashboard() {
 
   async function handleToggleNotification(id: number, enabled: boolean) {
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/api/notifications/${id}`, {
+      const res = await fetch(apiUrl(`/api/notifications/${id}`), {
         method: "PATCH",
         headers: authHeaders(),
         body: JSON.stringify({ enabled }),
       });
-      if (!res.ok) throw new Error("Failed to update notification");
-      setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, enabled } : n)));
+      const text = await res.text();
+      if (!res.ok) {
+        toast.error(parseApiErrorText(text, res.status));
+        return;
+      }
+      const updated = normalizeNotificationRow(JSON.parse(text) as NotificationSetting);
+      setNotifications((prev) => prev.map((n) => (Number(n.id) === Number(id) ? updated : n)));
     } catch {
       toast.error("Failed to update notification");
     }
@@ -369,7 +506,7 @@ export default function Dashboard() {
 
   async function handleTestEmail() {
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/api/alert/test`);
+      const res = await fetch(apiUrl("/api/alert/test"));
       if (!res.ok) throw new Error("Failed to send test email");
       const data = await res.json();
       toast.success(`Test email sent to ${data.recipient || "configured email"}`);
@@ -380,7 +517,7 @@ export default function Dashboard() {
 
   async function handleRecalculateBaselines() {
     try {
-      const res = await fetch(`${import.meta.env.VITE_API_BASE_URL}/api/baselines/recalculate`, {
+      const res = await fetch(apiUrl("/api/baselines/recalculate"), {
         method: "POST",
         headers: authHeaders(),
       });
@@ -470,456 +607,738 @@ export default function Dashboard() {
     }
   }
 
+  const trendReadingsCount = chartData.length;
+  const primaryStroke = "#38bdf8";
+  const chartAccent2 = "#a78bfa";
+  const gaugeTrack = "rgba(15, 23, 42, 0.08)";
+  const latestBacPct = latest ? Math.min(Math.max(Number(latest.alcohol_level) * 100, 0), 100) : 0;
+  const latestGaugeRest = Math.max(0, 100 - latestBacPct);
+  const latestArcColor =
+    latest?.status === "DANGER" ? "#f87171" : latest?.status === "WARNING" ? "#fb923c" : "#4ade80";
+  const tooltipGlass: CSSProperties = {
+    background: "rgba(255, 255, 255, 0.92)",
+    border: "1px solid rgba(148,163,184,0.35)",
+    borderRadius: 12,
+    fontSize: 12,
+    backdropFilter: "blur(12px)",
+    boxShadow: "0 12px 40px -8px rgba(15, 23, 42, 0.12)",
+  };
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50">
-      {/* Header */}
-      <header className="bg-white/80 backdrop-blur-lg border-b border-indigo-100 shadow-sm sticky top-0 z-40">
-        <div className="container max-w-7xl flex items-center justify-between h-16 px-6">
-          <div className="flex items-center gap-3">
-            <img src="/logo.svg" alt="SoberWatch - IoT Alcohol Monitoring System" className="h-10 w-auto" />
-          </div>
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2 text-sm px-3 py-1.5 rounded-full bg-indigo-50">
-              {realtimeOn ? (
-                <>
-                  <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-                  <span className="font-medium text-green-700">Live</span>
-                </>
-              ) : (
-                <>
-                  <div className="w-2 h-2 rounded-full bg-slate-400" />
-                  <span className="text-slate-500">Offline</span>
-                </>
-              )}
-            </div>
-            <Button variant="outline" size="sm" className="border-indigo-200 text-indigo-700 hover:bg-indigo-50" onClick={() => navigate("/setup")}>
-              <Cpu className="w-4 h-4 mr-2" /> Device Setup
-            </Button>
-            <Button variant="outline" size="sm" className="border-indigo-200 text-indigo-700 hover:bg-indigo-50" onClick={() => navigate("/audit")}>
-              <Shield className="w-4 h-4 mr-2" /> Audit Log
-            </Button>
-            <Button variant="outline" size="sm" className="border-indigo-200 text-indigo-700 hover:bg-indigo-50" onClick={() => { signOut(); navigate('/auth'); }}>
-              <LogOut className="w-4 h-4 mr-2" /> Logout
-            </Button>
-          </div>
-        </div>
-      </header>
-
-      <main className="container max-w-7xl py-8 px-6 space-y-8">
-        {/* Alert History Search */}
-        <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-6 shadow-lg shadow-indigo-100/50 border border-indigo-100/50">
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
-              <span className="w-8 h-8 rounded-lg bg-blue-100 flex items-center justify-center">
-                <Activity className="w-4 h-4 text-blue-600" />
-              </span>
-              Search Alerts by Date
-            </h2>
-            <p className="text-sm text-slate-500 ml-10">View historical alerts that occurred on a specific date</p>
-          </div>
-          <div className="flex flex-wrap gap-4 items-end">
-            <div className="flex-1 min-w-[180px]">
-              <label className="text-xs font-semibold text-slate-600 uppercase tracking-wider block mb-2">From Date</label>
-              <Input
-                type="date"
-                value={dateFrom}
-                onChange={(e) => setDateFrom(e.target.value)}
-                className="w-full border-indigo-200 focus:border-blue-500 focus:ring-blue-500/20"
-              />
-            </div>
-            <div className="flex-1 min-w-[180px]">
-              <label className="text-xs font-semibold text-slate-600 uppercase tracking-wider block mb-2">To Date</label>
-              <Input
-                type="date"
-                value={dateTo}
-                onChange={(e) => setDateTo(e.target.value)}
-                className="w-full border-indigo-200 focus:border-blue-500 focus:ring-blue-500/20"
-              />
-            </div>
-            <div className="flex-1 min-w-[180px]">
-              <label className="text-xs font-semibold text-slate-600 uppercase tracking-wider block mb-2">Device</label>
-              <Select value={deviceFilter} onValueChange={setDeviceFilter}>
-                <SelectTrigger className="w-full border-indigo-200 focus:border-blue-500 focus:ring-blue-500/20">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="all">All devices</SelectItem>
-                  {devices.map((d) => (
-                    <SelectItem key={d} value={d}>
-                      {d}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <Button
-              size="sm"
-              className="bg-blue-600 hover:bg-blue-700 text-white shadow-lg shadow-blue-500/30"
-              onClick={() => setSearchTriggered(prev => prev + 1)}
-            >
-              Search
-            </Button>
-            {(deviceFilter !== "all" || dateFrom || dateTo) && (
-              <Button
-                variant="outline"
-                size="sm"
-                className="border-indigo-200 text-slate-600 hover:bg-indigo-50"
-                onClick={() => {
-                  setDeviceFilter("all");
-                  setDateFrom("");
-                  setDateTo("");
-                  setSearchTriggered(prev => prev + 1);
-                }}
-              >
-                Clear Filters
-              </Button>
-            )}
-          </div>
+    <DashboardShell
+      activeNav={shellNav}
+      connected={realtimeOn}
+      alertCount={alerts.length}
+      breadcrumbs={
+        <>
+          <span className="font-medium text-foreground">SoberWatch</span>
+          <span className="mx-2 opacity-50">/</span>
+          <span>{crumbLabel}</span>
+        </>
+      }
+    >
+      <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col">
+        <div className="min-h-0 flex-1 space-y-6 overflow-y-auto pb-2">
+          {section === "home" && (
+            <>
+        <div>
+          <h1 className="bg-gradient-to-r from-slate-900 via-slate-700 to-slate-900 bg-clip-text text-2xl font-semibold tracking-tight text-transparent md:text-3xl">
+            Dashboard
+          </h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Real-time alcohol monitoring · {stats.total} {stats.total === 1 ? "reading" : "readings"}
+          </p>
         </div>
 
-        {/* DANGER alert banner */}
-        {latest && latest.status === "DANGER" && (
-          <div className="animate-in fade-in slide-in-from-top-2 duration-300">
-            <div className="bg-red-50 border-2 border-red-200 rounded-xl p-6 shadow-lg">
-              <div className="flex items-start gap-4 mb-4">
-                <div className="mt-0.5">
-                  <AlertTriangle className="w-6 h-6 text-red-600" />
-                </div>
-                <div className="flex-1">
-                  <h3 className="text-lg font-bold text-red-700">⚠️ DANGER ALCOHOL DETECTED</h3>
-                   <p className="text-sm text-red-800 mt-1">
-                     Device <strong>{latest.device_id}</strong> reported a level of{" "}
-                     <strong>{formatAlcoholLevel(latest.alcohol_level)}</strong> ({formatAlcoholPercentage(latest.alcohol_level)}) at{" "}
-                     {format(new Date(latest.timestamp), "PPpp")}
-                   </p>
-                </div>
-              </div>
-              
-              {/* Alert Details */}
-              <div className="bg-white rounded-lg p-4 mb-4 border border-red-100">
-                <h4 className="text-sm font-semibold text-slate-700 mb-3">Alert Details</h4>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                   <div>
-                     <div className="text-slate-500">Device ID</div>
-                     <div className="font-semibold text-slate-900">{latest.device_id}</div>
-                   </div>
-                   <div>
-                     <div className="text-slate-500">Alcohol Level</div>
-                     <div className="font-semibold text-red-600">{formatAlcoholLevel(latest.alcohol_level)}</div>
-                   </div>
-                   <div>
-                     <div className="text-slate-500">Concentration</div>
-                     <div className="font-semibold text-red-600">{formatAlcoholPercentage(latest.alcohol_level)}</div>
-                   </div>
-                   <div>
-                     <div className="text-slate-500">Timestamp</div>
-                     <div className="font-semibold text-slate-900">{format(new Date(latest.timestamp), "HH:mm:ss")}</div>
-                   </div>
-                </div>
-               </div>
-
-               <div className="flex gap-3 mt-4">
-                 <Button size="sm" variant="outline" className="border-red-300 text-red-700 hover:bg-red-100" onClick={() => setHighAlertId(null)}>
-                   Acknowledge
-                 </Button>
-                 <Button size="sm" className="bg-red-600 hover:bg-red-700 text-white" onClick={() => generatePDF(latest)}>
-                   <Printer className="w-4 h-4 mr-2" /> Export PDF Report
-                 </Button>
-               </div>
+        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="luxury-kpi-shell">
+            <div className="h-1 bg-gradient-to-r from-amber-400 via-yellow-200 to-amber-500 shadow-[0_0_20px_rgba(251,191,36,0.35)]" />
+            <div className="p-5">
+              <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Total</p>
+              <p className="mt-1 text-3xl font-semibold tabular-nums text-foreground">{stats.total}</p>
+              <p className="mt-2 text-xs text-muted-foreground">Updated live</p>
             </div>
           </div>
-        )}
-
-        {/* Status Overview Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-6 shadow-lg shadow-green-100/50 border border-green-100 hover:shadow-xl transition-shadow">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-3">
-                <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-green-100 to-green-200 flex items-center justify-center shadow-sm">
-                  <div className="w-4 h-4 rounded-full bg-green-500 animate-pulse shadow-lg shadow-green-500/50" />
-                </div>
-                <h3 className="text-sm font-semibold text-slate-600 uppercase tracking-wider">Safe</h3>
-              </div>
-            </div>
-            <div className="text-5xl font-bold text-green-600 tabular-nums">{stats.safe}</div>
-            <p className="text-sm text-slate-500 mt-2">Total safe readings</p>
-          </div>
-
-          <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-6 shadow-lg shadow-yellow-100/50 border border-yellow-100 hover:shadow-xl transition-shadow">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-3">
-                <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-yellow-100 to-yellow-200 flex items-center justify-center shadow-sm">
-                  <div className="w-4 h-4 rounded-full bg-yellow-500 shadow-lg shadow-yellow-500/50" />
-                </div>
-                <h3 className="text-sm font-semibold text-slate-600 uppercase tracking-wider">Warning</h3>
-              </div>
-            </div>
-            <div className="text-5xl font-bold text-yellow-600 tabular-nums">{stats.warn}</div>
-            <p className="text-sm text-slate-500 mt-2">Total warning readings</p>
-          </div>
-
-          <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-6 shadow-lg shadow-red-100/50 border border-red-100 relative overflow-hidden hover:shadow-xl transition-shadow">
-            <div className="absolute top-0 right-0 w-40 h-40 bg-gradient-to-br from-red-100 to-red-200 rounded-full -translate-y-1/2 translate-x-1/2 opacity-40" />
-            <div className="relative">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-3">
-                  <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-red-100 to-red-200 flex items-center justify-center shadow-sm">
-                    <div className="w-4 h-4 rounded-full bg-red-500 animate-pulse shadow-lg shadow-red-500/50" />
-                  </div>
-                  <h3 className="text-sm font-semibold text-slate-600 uppercase tracking-wider">High Alerts</h3>
-                </div>
-              </div>
-              <div className="text-5xl font-bold text-red-600 tabular-nums">{stats.high}</div>
-              <p className="text-sm text-slate-500 mt-2">High-risk detections</p>
-            </div>
-          </div>
-        </div>
-
-        {/* Alerts Section */}
-        <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-6 shadow-lg shadow-indigo-100/50 border border-indigo-100/50">
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-2">
-              <span className="w-8 h-8 rounded-lg bg-red-100 flex items-center justify-center">
-                <Bell className="w-4 h-4 text-red-600" />
-              </span>
-              <h2 className="text-lg font-semibold text-slate-900">Alerts</h2>
-            </div>
-            <div className="flex gap-2">
-              <button
-                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${alertView === "active" ? "bg-red-100 text-red-700" : "text-slate-500 hover:bg-slate-100"}`}
-                onClick={() => setAlertView("active")}
-              >
-                Active ({alerts.length})
-              </button>
-              <button
-                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${alertView === "history" ? "bg-slate-200 text-slate-700" : "text-slate-500 hover:bg-slate-100"}`}
-                onClick={() => setAlertView("history")}
-              >
-                <History className="w-3.5 h-3.5 inline mr-1" />
-                History ({historyAlerts.length})
-              </button>
-            </div>
-          </div>
-
-          {alertView === "active" ? (
-            alerts.length === 0 ? (
-              <div className="text-center text-slate-400 py-8">
-                <Bell className="w-8 h-8 mx-auto mb-2 text-slate-300" />
-                <p className="text-sm">No active alerts in the last 10 minutes</p>
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {alerts.map((alert) => (
-                  <div
-                    key={alert.id}
-                    className={`flex items-center justify-between p-3 rounded-lg border ${alert.status === "DANGER" ? "bg-red-50 border-red-200" : "bg-orange-50 border-orange-200"}`}
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className={`w-2 h-2 rounded-full ${alert.status === "DANGER" ? "bg-red-500 animate-pulse" : "bg-orange-500"}`} />
-                      <div>
-                        <p className="text-sm font-semibold text-slate-900">{alert.device_id}</p>
-                        <p className="text-xs text-slate-500">{formatAlcoholLevel(alert.alcohol_level)} — {alert.status}</p>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-xs text-slate-500">{format(new Date(alert.created_at), "HH:mm:ss")}</p>
-                      {alert.acknowledged && <span className="text-xs text-green-600">Acknowledged</span>}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )
-          ) : historyAlerts.length === 0 ? (
-            <div className="text-center text-slate-400 py-8">
-              <History className="w-8 h-8 mx-auto mb-2 text-slate-300" />
-              <p className="text-sm">No alert history yet</p>
-            </div>
-          ) : (
-            <div className="space-y-2 max-h-[320px] overflow-y-auto">
-              {historyAlerts.map((alert) => (
+          <div className="luxury-kpi-shell">
+            <div className="h-1 bg-gradient-to-r from-sky-400 to-cyan-300 shadow-[0_0_20px_rgba(56,189,248,0.35)]" />
+            <div className="p-5">
+              <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Safe</p>
+              <p className="mt-1 text-3xl font-semibold tabular-nums text-emerald-600">{stats.safe}</p>
+              <p className="mt-2 text-xs text-muted-foreground">
+                {stats.total > 0 ? ((stats.safe / stats.total) * 100).toFixed(0) : "0"}% of total
+              </p>
+              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted/80">
                 <div
-                  key={alert.id}
-                  className={`flex items-center justify-between p-3 rounded-lg border ${alert.status === "DANGER" ? "bg-red-50/60 border-red-100" : "bg-orange-50/60 border-orange-100"}`}
-                >
-                  <div className="flex items-center gap-3">
-                    <div className={`w-2 h-2 rounded-full ${alert.status === "DANGER" ? "bg-red-400" : "bg-orange-400"}`} />
-                    <div>
-                      <p className="text-sm font-medium text-slate-800">{alert.device_id}</p>
-                      <p className="text-xs text-slate-500">{formatAlcoholLevel(alert.alcohol_level)} — {alert.status}</p>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-xs text-slate-500">{format(new Date(alert.created_at), "yyyy-MM-dd HH:mm")}</p>
-                    <p className="text-xs text-slate-400">Archived {format(new Date(alert.archived_at), "HH:mm")}</p>
-                  </div>
-                </div>
-              ))}
+                  className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-cyan-400 shadow-[0_0_12px_rgba(52,211,153,0.4)] transition-all"
+                  style={{ width: `${stats.total ? (stats.safe / stats.total) * 100 : 0}%` }}
+                />
+              </div>
             </div>
-          )}
+          </div>
+          <div className="luxury-kpi-shell">
+            <div className="h-1 bg-gradient-to-r from-violet-500 to-fuchsia-400 shadow-[0_0_20px_rgba(167,139,250,0.35)]" />
+            <div className="p-5">
+              <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Warnings</p>
+              <p className="mt-1 text-3xl font-semibold tabular-nums text-amber-600">{stats.warn}</p>
+              <p className="mt-2 text-xs text-muted-foreground">
+                {stats.total > 0 ? ((stats.warn / stats.total) * 100).toFixed(0) : "0"}% of total
+              </p>
+              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted/80">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-violet-500 to-amber-400 transition-all"
+                  style={{ width: `${stats.total ? (stats.warn / stats.total) * 100 : 0}%` }}
+                />
+              </div>
+            </div>
+          </div>
+          <div className="luxury-kpi-shell">
+            <div className="h-1 bg-gradient-to-r from-rose-500 to-red-600 shadow-[0_0_20px_rgba(248,113,113,0.35)]" />
+            <div className="p-5">
+              <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Danger</p>
+              <p className="mt-1 text-3xl font-semibold tabular-nums text-destructive">{stats.high}</p>
+              <p className="mt-2 text-xs text-muted-foreground">
+                {stats.total > 0 ? ((stats.high / stats.total) * 100).toFixed(0) : "0"}% of total
+              </p>
+              <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-muted/80">
+                <div
+                  className="h-full rounded-full bg-destructive transition-all"
+                  style={{ width: `${stats.total ? (stats.high / stats.total) * 100 : 0}%` }}
+                />
+              </div>
+            </div>
+          </div>
         </div>
 
-        {/* Baseline Auto-Learning & Email Alerts — side by side */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Baseline Auto-Learning */}
-          <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-6 shadow-lg shadow-indigo-100/50 border border-indigo-100/50">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <span className="w-8 h-8 rounded-lg bg-purple-100 flex items-center justify-center">
-                  <Brain className="w-4 h-4 text-purple-600" />
-                </span>
-                <div>
-                  <h2 className="text-lg font-semibold text-slate-900">Baseline Auto-Learning</h2>
-                  <p className="text-xs text-slate-500">Per-device normal level profiles</p>
+        <div className="grid gap-6 lg:grid-cols-2">
+          <div className="luxury-glass-panel">
+            <h2 className="text-base font-semibold text-foreground">Latest reading</h2>
+            {latest ? (
+              <>
+                <div className="relative mx-auto mt-4 h-[220px] w-full max-w-[280px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <defs>
+                        <filter id="arcGlow" x="-40%" y="-40%" width="180%" height="180%">
+                          <feGaussianBlur stdDeviation="3" result="b" />
+                          <feMerge>
+                            <feMergeNode in="b" />
+                            <feMergeNode in="SourceGraphic" />
+                          </feMerge>
+                        </filter>
+                      </defs>
+                      <Pie
+                        data={[
+                          { name: "level", value: latestBacPct },
+                          { name: "rest", value: latestGaugeRest },
+                        ]}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={72}
+                        outerRadius={96}
+                        startAngle={90}
+                        endAngle={-270}
+                        dataKey="value"
+                        stroke="none"
+                      >
+                        <Cell fill={latestArcColor} filter="url(#arcGlow)" />
+                        <Cell fill={gaugeTrack} />
+                      </Pie>
+                    </PieChart>
+                  </ResponsiveContainer>
+                  <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center pt-2">
+                    <span className="text-3xl font-semibold tabular-nums text-foreground">
+                      {(Number(latest.alcohol_level) * 100).toFixed(1)}%
+                    </span>
+                    <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">BAC</span>
+                    <span className="mt-1 text-[10px] text-muted-foreground">{latest.device_id}</span>
+                  </div>
                 </div>
-              </div>
-              <Button variant="outline" size="sm" className="border-purple-200 text-purple-700 hover:bg-purple-50" onClick={handleRecalculateBaselines}>
-                <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Recalculate
-              </Button>
-            </div>
-
-            {baselines.length === 0 ? (
-              <div className="text-center text-slate-400 py-8">
-                <Brain className="w-8 h-8 mx-auto mb-2 text-slate-300" />
-                <p className="text-sm">No baseline data yet</p>
-                <p className="text-xs mt-1">Baselines build automatically as readings come in</p>
-              </div>
+                <div className="mt-4 flex justify-center">
+                  <span
+                    className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold ${
+                      latest.status === "DANGER"
+                        ? "bg-red-100 text-red-800"
+                        : latest.status === "WARNING"
+                          ? "bg-amber-100 text-amber-800"
+                          : "bg-emerald-100 text-emerald-800"
+                    }`}
+                  >
+                    <AlertTriangle className="h-3.5 w-3.5" />
+                    {latest.status}
+                  </span>
+                </div>
+              </>
             ) : (
-              <div className="space-y-3">
-                {baselines.map((b) => {
-                  const mean = Number(b.mean_level);
-                  const stdDev = Number(b.std_dev);
-                  const samples = Number(b.sample_count);
-                  const threshold = Number(b.deviation_threshold);
-                  const lastReading = Number(b.last_reading);
-                  const deviation = stdDev > 0 ? (lastReading - mean) / stdDev : 0;
-                  const isAnomaly = deviation >= threshold;
-                  const meanPct = (mean * 100).toFixed(2);
-                  const stdPct = (stdDev * 100).toFixed(3);
-
-                  return (
-                    <div key={b.device_id} className={`p-4 rounded-xl border ${isAnomaly ? "bg-orange-50/60 border-orange-200" : "bg-slate-50/50 border-slate-200"}`}>
-                      <div className="flex items-center justify-between mb-2">
-                        <span className="font-semibold text-sm text-slate-900">{b.device_id}</span>
-                        {isAnomaly && (
-                          <span className="text-xs px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 font-medium">
-                            Anomaly ({deviation.toFixed(1)}σ)
-                          </span>
-                        )}
-                      </div>
-                      <div className="grid grid-cols-4 gap-3 text-xs">
-                        <div>
-                          <div className="text-slate-500">Mean</div>
-                          <div className="font-semibold text-slate-800">{mean.toFixed(4)} mg/L</div>
-                          <div className="text-slate-400">{meanPct}%</div>
-                        </div>
-                        <div>
-                          <div className="text-slate-500">Std Dev</div>
-                          <div className="font-semibold text-slate-800">{stdDev.toFixed(4)}</div>
-                          <div className="text-slate-400">{stdPct}%</div>
-                        </div>
-                        <div>
-                          <div className="text-slate-500">Samples</div>
-                          <div className="font-semibold text-slate-800">{samples}</div>
-                          <div className="text-slate-400">{samples < 5 ? "Learning" : "Stable"}</div>
-                        </div>
-                        <div>
-                          <div className="text-slate-500">Threshold</div>
-                          <div className="font-semibold text-slate-800">{threshold.toFixed(1)}σ</div>
-                          <div className="text-slate-400">Deviation</div>
-                        </div>
-                      </div>
-                      {/* Visual baseline range bar */}
-                      <div className="mt-3">
-                        <div className="relative h-2 bg-slate-200 rounded-full overflow-hidden">
-                          {/* Normal range (mean ± 2σ) */}
-                          <div
-                            className="absolute h-full bg-green-200 rounded-full"
-                            style={{
-                              left: `${Math.max(0, 30 - 20)}%`,
-                              width: `${Math.min(40, 100)}%`,
-                            }}
-                          />
-                          {/* Mean indicator */}
-                          <div
-                            className="absolute h-full w-0.5 bg-green-600"
-                            style={{ left: `${Math.min(50, 95)}%` }}
-                          />
-                          {/* Last reading indicator */}
-                          <div
-                            className={`absolute h-full w-1 rounded-full ${isAnomaly ? "bg-orange-500" : "bg-blue-500"}`}
-                            style={{ left: `${Math.min(Math.max((lastReading / (mean + 3 * stdDev || 0.1)) * 100, 2), 98)}%` }}
-                          />
-                        </div>
-                        <div className="flex justify-between text-[10px] text-slate-400 mt-1">
-                          <span>0</span>
-                          <span>Mean</span>
-                          <span>+3σ</span>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+              <p className="mt-8 text-center text-sm text-muted-foreground">No readings yet</p>
             )}
           </div>
 
-          {/* Email Alert Settings */}
-          <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-6 shadow-lg shadow-indigo-100/50 border border-indigo-100/50">
-            <div className="flex items-center justify-between mb-4">
-              <div className="flex items-center gap-2">
-                <span className="w-8 h-8 rounded-lg bg-blue-100 flex items-center justify-center">
-                  <Mail className="w-4 h-4 text-blue-600" />
-                </span>
-                <div>
-                  <h2 className="text-lg font-semibold text-slate-900">Email Alerts</h2>
-                  <p className="text-xs text-slate-500">Get notified when alerts trigger</p>
-                </div>
+          <div className="luxury-glass-panel">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <h2 className="text-base font-semibold text-foreground">Alcohol level trend</h2>
+                <p className="text-sm text-muted-foreground">
+                  Last {trendReadingsCount} readings · BAC %
+                </p>
               </div>
-              {!emailConfigured ? (
-                <span className="text-xs px-2 py-1 rounded-full bg-amber-100 text-amber-700 font-medium">
-                  SMTP not configured
-                </span>
+              <div className="inline-flex shrink-0 rounded-xl border border-slate-200/80 bg-slate-900/[0.035] p-0.5">
+                <button
+                  type="button"
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-all duration-300 ${
+                    trendChartKind === "line"
+                      ? "bg-white text-slate-900 shadow-md"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                  onClick={() => setTrendChartKind("line")}
+                >
+                  Line
+                </button>
+                <button
+                  type="button"
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-all duration-300 ${
+                    trendChartKind === "bar"
+                      ? "bg-white text-slate-900 shadow-md"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                  onClick={() => setTrendChartKind("bar")}
+                >
+                  Bar
+                </button>
+              </div>
+            </div>
+            <div className="mt-4 h-64">
+              {chartData.length === 0 ? (
+                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                  No data to chart yet.
+                </div>
+              ) : trendChartKind === "line" ? (
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="bacFill" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor={primaryStroke} stopOpacity={0.38} />
+                        <stop offset="45%" stopColor={chartAccent2} stopOpacity={0.14} />
+                        <stop offset="100%" stopColor={primaryStroke} stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="currentColor" className="text-muted-foreground/15" vertical={false} />
+                    <XAxis dataKey="time" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+                    <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" domain={[0, "auto"]} />
+                    <Tooltip contentStyle={tooltipGlass} formatter={(v: number) => [`${Number(v).toFixed(2)}%`, "BAC"]} />
+                    <ReferenceLine y={2} stroke="#fb923c" strokeDasharray="4 4" strokeOpacity={0.85} />
+                    <ReferenceLine y={5} stroke="#f87171" strokeDasharray="4 4" strokeOpacity={0.85} />
+                    <Area
+                      type="monotone"
+                      dataKey="bacPct"
+                      stroke={primaryStroke}
+                      strokeWidth={2.5}
+                      fill="url(#bacFill)"
+                      dot={false}
+                      activeDot={{ r: 4, strokeWidth: 0, fill: "#fbbf24", filter: "drop-shadow(0 0 6px rgba(251,191,36,0.8))" }}
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
               ) : (
-                <Button variant="outline" size="sm" className="border-blue-200 text-blue-700 hover:bg-blue-50" onClick={handleTestEmail}>
-                  <Send className="w-3.5 h-3.5 mr-1.5" /> Test Email
-                </Button>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="bacBar" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#38bdf8" />
+                        <stop offset="100%" stopColor="#6366f1" />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="currentColor" className="text-muted-foreground/15" vertical={false} />
+                    <XAxis dataKey="time" tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" />
+                    <YAxis tick={{ fontSize: 10 }} stroke="hsl(var(--muted-foreground))" domain={[0, "auto"]} />
+                    <Tooltip contentStyle={tooltipGlass} formatter={(v: number) => [`${Number(v).toFixed(2)}%`, "BAC"]} />
+                    <ReferenceLine y={2} stroke="#fb923c" strokeDasharray="4 4" strokeOpacity={0.85} />
+                    <ReferenceLine y={5} stroke="#f87171" strokeDasharray="4 4" strokeOpacity={0.85} />
+                    <Bar dataKey="bacPct" fill="url(#bacBar)" radius={[6, 6, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
               )}
             </div>
+          </div>
+        </div>
+
+            {latest && latest.status === "DANGER" && (
+              <div className="animate-in fade-in slide-in-from-top-2 duration-300">
+                <div className="rounded-xl border border-destructive/40 bg-destructive/5 p-6 shadow-sm">
+                  <div className="mb-5 flex items-start gap-4">
+                    <div className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-destructive/30 bg-background text-destructive">
+                      <AlertTriangle className="h-6 w-6" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <h3 className="mb-2 text-lg font-semibold tracking-tight text-destructive">Danger: alcohol threshold exceeded</h3>
+                      <p className="text-sm text-foreground/90">
+                        Device <strong>{latest.device_id}</strong> reported a level of{" "}
+                        <strong>{formatAlcoholLevel(latest.alcohol_level)}</strong> ({formatAlcoholPercentage(latest.alcohol_level)}) at{" "}
+                        {format(new Date(latest.timestamp), "PPpp")}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mb-5 rounded-lg border border-border bg-background p-5">
+                    <h4 className="mb-4 flex items-center gap-2 text-sm font-semibold text-foreground">
+                      <div className="flex h-7 w-7 items-center justify-center rounded-md border bg-muted text-destructive">
+                        <FileText className="h-3.5 w-3.5" />
+                      </div>
+                      Alert details
+                    </h4>
+                    <div className="grid grid-cols-2 gap-3 text-sm md:grid-cols-4 md:gap-4">
+                      <div className="rounded-lg border border-border bg-card p-3">
+                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Device ID</div>
+                        <div className="mt-1 font-semibold text-foreground">{latest.device_id}</div>
+                      </div>
+                      <div className="rounded-lg border border-border bg-card p-3">
+                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Alcohol level</div>
+                        <div className="mt-1 font-semibold text-destructive">{formatAlcoholLevel(latest.alcohol_level)}</div>
+                      </div>
+                      <div className="rounded-lg border border-border bg-card p-3">
+                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Concentration</div>
+                        <div className="mt-1 font-semibold text-destructive">{formatAlcoholPercentage(latest.alcohol_level)}</div>
+                      </div>
+                      <div className="rounded-lg border border-border bg-card p-3">
+                        <div className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Timestamp</div>
+                        <div className="mt-1 font-semibold text-foreground">{format(new Date(latest.timestamp), "HH:mm:ss")}</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="sm" variant="outline" onClick={() => setHighAlertId(null)}>
+                      Acknowledge
+                    </Button>
+                    <Button size="sm" variant="destructive" onClick={() => generatePDF(latest)}>
+                      <Printer className="mr-2 h-4 w-4" /> Export PDF
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            </>
+          )}
+
+          {section === "reports" && (
+          <div className="luxury-glass-panel">
+            <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border bg-muted/60 text-primary">
+                  <BarChart3 className="h-5 w-5" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-semibold tracking-tight text-foreground">Reports</h2>
+                  <p className="mt-0.5 text-sm text-muted-foreground">Weekly and monthly monitoring summaries</p>
+                </div>
+              </div>
+              <div className="inline-flex rounded-lg border border-border bg-muted/50 p-0.5">
+                <Button
+                  variant={reportPeriod === "weekly" ? "default" : "ghost"}
+                  size="sm"
+                  className="rounded-md shadow-none"
+                  onClick={() => setReportPeriod("weekly")}
+                >
+                  Weekly
+                </Button>
+                <Button
+                  variant={reportPeriod === "monthly" ? "default" : "ghost"}
+                  size="sm"
+                  className="rounded-md shadow-none"
+                  onClick={() => setReportPeriod("monthly")}
+                >
+                  Monthly
+                </Button>
+              </div>
+            </div>
+
+{/* Report Controls */}
+            <div className="mb-6 flex flex-wrap items-end gap-4">
+              <div className="flex-1 min-w-[150px]">
+                <label className="mb-2 block text-xs font-medium uppercase tracking-wide text-muted-foreground">Year</label>
+                <div className="relative">
+                  <Input
+                    type="number"
+                    value={reportYear}
+                    onChange={(e) => setReportYear(Number(e.target.value))}
+                    min={2020}
+                    max={2100}
+                    className="w-full bg-background"
+                  />
+                </div>
+              </div>
+              {reportPeriod === "weekly" && (
+                <div className="flex-1 min-w-[150px]">
+                  <label className="mb-2 block text-xs font-medium uppercase tracking-wide text-muted-foreground">Month</label>
+                  <Select value={String(reportMonth)} onValueChange={(v) => setReportMonth(Number(v))}>
+                    <SelectTrigger className="w-full bg-background">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                        <SelectItem key={m} value={String(m)}>
+                          {new Date(2026, m - 1).toLocaleString("default", { month: "long" })}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+              <div className="flex-1 min-w-[150px]">
+                <label className="mb-2 block text-xs font-medium uppercase tracking-wide text-muted-foreground">Device</label>
+                <Select value={reportDevice} onValueChange={setReportDevice}>
+                  <SelectTrigger className="w-full bg-background">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All devices</SelectItem>
+                    {devices.map((d) => (
+                      <SelectItem key={d} value={d}>
+                        {d}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+             <Button size="sm" onClick={() => void fetchReport(true)} disabled={loadingReport}>
+               {loadingReport ? <RefreshCw className="h-4 w-4 animate-spin" /> : "Generate report"}
+             </Button>
+            </div>
+
+{/* Report Results */}
+            {reportData && (
+              <div className="space-y-6">
+                {/* Overall Summary */}
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="luxury-glass-panel border-l-4 border-l-emerald-500 !p-5">
+                    <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Safe readings</div>
+                    <div className="text-3xl font-semibold tabular-nums text-emerald-700">{reportData.overall.SAFE}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {reportData.overall.total > 0
+                        ? ((reportData.overall.SAFE / reportData.overall.total) * 100).toFixed(1)
+                        : "0"}% of total
+                    </div>
+                  </div>
+                  <div className="luxury-glass-panel border-l-4 border-l-amber-500 !p-5">
+                    <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Warning</div>
+                    <div className="text-3xl font-semibold tabular-nums text-amber-700">{reportData.overall.WARNING}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {reportData.overall.total > 0
+                        ? ((reportData.overall.WARNING / reportData.overall.total) * 100).toFixed(1)
+                        : "0"}% of total
+                    </div>
+                  </div>
+                  <div className="luxury-glass-panel border-l-4 border-l-destructive !p-5">
+                    <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Danger</div>
+                    <div className="text-3xl font-semibold tabular-nums text-destructive">{reportData.overall.DANGER}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {reportData.overall.total > 0
+                        ? ((reportData.overall.DANGER / reportData.overall.total) * 100).toFixed(1)
+                        : "0"}% of total
+                    </div>
+                  </div>
+                  <div className="luxury-glass-panel border-l-4 border-l-slate-300 !p-5">
+                    <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Total readings</div>
+                    <div className="text-3xl font-semibold tabular-nums text-foreground">{reportData.overall.total}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">Selected period</div>
+                  </div>
+                </div>
+
+               {/* Per-Device Breakdown */}
+               {Object.entries(reportData.perDevice).length > 0 && (
+                 <div>
+                   <h3 className="mb-3 text-sm font-semibold text-foreground">Per-device breakdown</h3>
+                   <div className="overflow-x-auto rounded-lg border">
+                     <table className="w-full text-sm">
+                       <thead>
+                         <tr className="border-b bg-muted/50">
+                           <th className="px-3 py-2.5 text-left font-medium text-muted-foreground">Device</th>
+                           <th className="px-3 py-2.5 text-right font-medium text-emerald-700">Safe</th>
+                           <th className="px-3 py-2.5 text-right font-medium text-amber-700">Warning</th>
+                           <th className="px-3 py-2.5 text-right font-medium text-destructive">Danger</th>
+                           <th className="px-3 py-2.5 text-right font-medium text-foreground">Total</th>
+                         </tr>
+                       </thead>
+                       <tbody>
+                         {Object.entries(reportData.perDevice).map(([device, stats]) => (
+                           <tr key={device} className="border-b border-border last:border-0 hover:bg-muted/30">
+                             <td className="px-3 py-2.5 font-medium text-foreground">{device}</td>
+                             <td className="px-3 py-2.5 text-right tabular-nums text-emerald-700">{stats.SAFE}</td>
+                             <td className="px-3 py-2.5 text-right tabular-nums text-amber-700">{stats.WARNING}</td>
+                             <td className="px-3 py-2.5 text-right tabular-nums text-destructive">{stats.DANGER}</td>
+                             <td className="px-3 py-2.5 text-right font-medium tabular-nums text-muted-foreground">{stats.total}</td>
+                           </tr>
+                         ))}
+                       </tbody>
+                     </table>
+                   </div>
+                 </div>
+               )}
+             </div>
+           )}
+
+           {loadingReport && (
+             <div className="py-8 text-center text-muted-foreground">
+               <RefreshCw className="mx-auto mb-2 h-6 w-6 animate-spin" />
+               <p className="text-sm">Generating report…</p>
+             </div>
+           )}
+
+           {!loadingReport && reportData && Object.keys(reportData.perDevice).length === 0 && (
+             <div className="py-8 text-center text-muted-foreground">
+               <BarChart3 className="mx-auto mb-2 h-8 w-8 opacity-40" />
+               <p className="text-sm">No log data for the selected period</p>
+             </div>
+           )}
+         </div>
+          )}
+
+          {section === "devices" && (
+            <>
+{/* Alert History Search */}
+          <div className="luxury-glass-panel">
+           <div className="mb-5">
+             <div className="flex items-start gap-3">
+               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border bg-muted/60 text-primary">
+                 <Activity className="h-5 w-5" />
+               </div>
+               <div>
+                 <h2 className="text-lg font-semibold tracking-tight text-foreground">Search logs by date</h2>
+                 <p className="mt-1 text-sm text-muted-foreground">Filter the table and charts by date range and device</p>
+               </div>
+             </div>
+           </div>
+           <div className="flex flex-wrap items-end gap-4">
+             <div className="min-w-[180px] flex-1">
+               <label className="mb-2 block text-xs font-medium uppercase tracking-wide text-muted-foreground">From date</label>
+               <Input
+                 type="date"
+                 value={dateFrom}
+                 onChange={(e) => setDateFrom(e.target.value)}
+                 className="w-full bg-background"
+               />
+             </div>
+             <div className="min-w-[180px] flex-1">
+               <label className="mb-2 block text-xs font-medium uppercase tracking-wide text-muted-foreground">To date</label>
+               <Input
+                 type="date"
+                 value={dateTo}
+                 onChange={(e) => setDateTo(e.target.value)}
+                 className="w-full bg-background"
+               />
+             </div>
+             <div className="min-w-[180px] flex-1">
+               <label className="mb-2 block text-xs font-medium uppercase tracking-wide text-muted-foreground">Device</label>
+               <Select value={deviceFilter} onValueChange={setDeviceFilter}>
+                 <SelectTrigger className="w-full bg-background">
+                   <SelectValue />
+                 </SelectTrigger>
+                 <SelectContent>
+                   <SelectItem value="all">All devices</SelectItem>
+                   {devices.map((d) => (
+                     <SelectItem key={d} value={d}>
+                       {d}
+                     </SelectItem>
+                   ))}
+                 </SelectContent>
+               </Select>
+             </div>
+             <Button size="sm" onClick={() => setSearchTriggered((prev) => prev + 1)}>
+               Search
+             </Button>
+             {(deviceFilter !== "all" || dateFrom || dateTo) && (
+               <Button
+                 variant="outline"
+                 size="sm"
+                 onClick={() => {
+                   setDeviceFilter("all");
+                   setDateFrom("");
+                   setDateTo("");
+                   setSearchTriggered((prev) => prev + 1);
+                 }}
+               >
+                 Clear filters
+               </Button>
+             )}
+           </div>
+         </div>
+
+{/* Baseline Auto-Learning & Email Alerts — side by side */}
+         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+           {/* Baseline Auto-Learning */}
+           <div className="luxury-glass-panel">
+             <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+               <div className="flex items-start gap-3">
+                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border bg-muted/60 text-primary">
+                   <Brain className="h-5 w-5" />
+                 </div>
+                 <div>
+                   <h2 className="text-lg font-semibold tracking-tight text-foreground">Baseline auto-learning</h2>
+                   <p className="mt-0.5 text-sm text-muted-foreground">Per-device normal level profiles</p>
+                 </div>
+               </div>
+               <Button variant="outline" size="sm" onClick={handleRecalculateBaselines}>
+                 <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Recalculate
+               </Button>
+             </div>
+
+{baselines.length === 0 ? (
+               <div className="py-10 text-center text-muted-foreground">
+                 <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border bg-muted/50">
+                   <Brain className="h-7 w-7 opacity-50" />
+                 </div>
+                 <p className="text-sm font-medium text-foreground">No baseline data yet</p>
+                 <p className="mt-1 text-xs">Baselines build automatically as readings arrive</p>
+               </div>
+             ) : (
+               <div className="space-y-3">
+                 {baselines.map((b) => {
+                   const mean = Number(b.mean_level);
+                   const stdDev = Number(b.std_dev);
+                   const samples = Number(b.sample_count);
+                   const threshold = Number(b.deviation_threshold);
+                   const lastReading = Number(b.last_reading);
+                   const deviation = stdDev > 0 ? (lastReading - mean) / stdDev : 0;
+                   const isAnomaly = deviation >= threshold;
+                   const meanPct = (mean * 100).toFixed(2);
+                   const stdPct = (stdDev * 100).toFixed(3);
+
+                   return (
+                     <div
+                       key={b.device_id}
+                       className={`rounded-lg border p-4 ${
+                         isAnomaly ? "border-amber-500/30 bg-amber-500/[0.04]" : "border-border bg-muted/20"
+                       }`}
+                     >
+                       <div className="mb-3 flex items-center justify-between gap-2">
+                         <span className="text-sm font-semibold text-foreground">{b.device_id}</span>
+                         {isAnomaly && (
+                           <span className="rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-900">
+                             Anomaly ({deviation.toFixed(1)}σ)
+                           </span>
+                         )}
+                       </div>
+                       <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+                         <div className="rounded-md border border-border bg-background p-2.5">
+                           <div className="text-muted-foreground">Mean</div>
+                           <div className="font-semibold text-foreground">{mean.toFixed(4)} mg/L</div>
+                           <div className="text-muted-foreground">{meanPct}%</div>
+                         </div>
+                         <div className="rounded-md border border-border bg-background p-2.5">
+                           <div className="text-muted-foreground">Std dev</div>
+                           <div className="font-semibold text-foreground">{stdDev.toFixed(4)}</div>
+                           <div className="text-muted-foreground">{stdPct}%</div>
+                         </div>
+                         <div className="rounded-md border border-border bg-background p-2.5">
+                           <div className="text-muted-foreground">Samples</div>
+                           <div className="font-semibold text-foreground">{samples}</div>
+                           <div className="text-muted-foreground">{samples < 5 ? "Learning" : "Stable"}</div>
+                         </div>
+                         <div className="rounded-md border border-border bg-background p-2.5">
+                           <div className="text-muted-foreground">Threshold</div>
+                           <div className="font-semibold text-foreground">{threshold.toFixed(1)}σ</div>
+                           <div className="text-muted-foreground">Deviation</div>
+                         </div>
+                       </div>
+                       {/* Visual baseline range bar */}
+                       <div className="mt-4">
+                         <div className="relative h-2 overflow-hidden rounded-full bg-muted">
+                           {/* Normal range (mean ± 2σ) */}
+                           <div
+                             className="absolute h-full rounded-full bg-emerald-200/80"
+                             style={{
+                               left: `${Math.max(0, 30 - 20)}%`,
+                               width: `${Math.min(40, 100)}%`,
+                             }}
+                           />
+                           {/* Mean indicator */}
+                           <div
+                             className="absolute h-full w-px bg-emerald-700"
+                             style={{ left: `${Math.min(50, 95)}%` }}
+                           />
+                           {/* Last reading indicator */}
+                           <div
+                             className={`absolute h-full w-1.5 rounded-full ${isAnomaly ? "bg-amber-500" : "bg-primary"}`}
+                             style={{ left: `${Math.min(Math.max((lastReading / (mean + 3 * stdDev || 0.1)) * 100, 2), 98)}%` }}
+                           />
+                         </div>
+                         <div className="mt-1.5 flex justify-between text-[10px] text-muted-foreground">
+                           <span>0</span>
+                           <span>Mean</span>
+                           <span>+3σ</span>
+                         </div>
+                       </div>
+                     </div>
+                   );
+                 })}
+               </div>
+             )}
+           </div>
+
+{/* Email Alert Settings */}
+           <div className="luxury-glass-panel">
+             <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+               <div className="flex items-start gap-3">
+                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border bg-muted/60 text-primary">
+                   <Mail className="h-5 w-5" />
+                 </div>
+                 <div>
+                   <h2 className="text-lg font-semibold tracking-tight text-foreground">Email alerts</h2>
+                   <p className="mt-0.5 text-sm text-muted-foreground">Notifications when alerts trigger</p>
+                 </div>
+               </div>
+               {!emailConfigured ? (
+                 <span className="inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-900">
+                   SMTP not configured
+                 </span>
+               ) : (
+                 <Button variant="outline" size="sm" onClick={handleTestEmail}>
+                   <Send className="mr-1.5 h-3.5 w-3.5" /> Test email
+                 </Button>
+               )}
+             </div>
 
             {/* Existing notification emails */}
             {notifications.length === 0 ? (
-              <div className="text-center text-slate-400 py-6">
-                <Mail className="w-8 h-8 mx-auto mb-2 text-slate-300" />
-                <p className="text-sm">No email alerts configured</p>
-                <p className="text-xs mt-1">Add an email to receive alert notifications</p>
+              <div className="py-8 text-center text-muted-foreground">
+                <Mail className="mx-auto mb-2 h-8 w-8 opacity-40" />
+                <p className="text-sm font-medium text-foreground">No email alerts configured</p>
+                <p className="mt-1 text-xs">Add a recipient to receive notifications</p>
               </div>
             ) : (
-              <div className="space-y-2 mb-4">
+              <div className="mb-4 space-y-2">
                 {notifications.map((n) => (
-                  <div key={n.id} className={`flex items-center justify-between p-3 rounded-lg border ${n.enabled ? "bg-blue-50/50 border-blue-100" : "bg-slate-50 border-slate-200 opacity-60"}`}>
-                    <div className="flex items-center gap-3 min-w-0">
+                  <div
+                    key={n.id}
+                    className={`flex items-center justify-between rounded-lg border p-3 ${
+                      n.enabled ? "border-border bg-background" : "border-border/80 bg-muted/30 opacity-70"
+                    }`}
+                  >
+                    <div className="flex min-w-0 items-center gap-3">
                       <Switch
                         checked={n.enabled}
                         onCheckedChange={(checked) => handleToggleNotification(n.id, checked)}
                         className="shrink-0"
                       />
                       <div className="min-w-0">
-                        <p className="text-sm font-medium text-slate-900 truncate">{n.email}</p>
-                        <div className="flex items-center gap-2 mt-0.5">
-                          <span className="text-xs text-slate-500">
+                        <p className="truncate text-sm font-medium text-foreground">{n.email}</p>
+                        <div className="mt-0.5 flex flex-wrap items-center gap-2">
+                          <span className="text-xs text-muted-foreground">
                             {n.device_id === "all" ? "All devices" : n.device_id}
                           </span>
-                          <span className="text-xs text-slate-400">•</span>
-                          <div className="flex gap-1">
+                          <span className="text-xs text-muted-foreground/60" aria-hidden>
+                            ·
+                          </span>
+                          <div className="flex flex-wrap gap-1">
                             {n.alert_types.map((t) => (
                               <span
                                 key={t}
-                                className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                                className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
                                   t === "DANGER"
-                                    ? "bg-red-100 text-red-700"
+                                    ? "bg-destructive/10 text-destructive"
                                     : t === "WARNING"
-                                    ? "bg-orange-100 text-orange-700"
-                                    : "bg-green-100 text-green-700"
+                                      ? "bg-amber-500/15 text-amber-800"
+                                      : "bg-emerald-500/10 text-emerald-800"
                                 }`}
                               >
                                 {t}
@@ -930,12 +1349,13 @@ export default function Dashboard() {
                       </div>
                     </div>
                     <Button
+                      type="button"
                       variant="ghost"
                       size="sm"
-                      className="text-red-400 hover:text-red-600 hover:bg-red-50 h-7 w-7 p-0 shrink-0"
+                      className="h-8 w-8 shrink-0 p-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                       onClick={() => handleDeleteNotification(n.id)}
                     >
-                      <X className="w-3.5 h-3.5" />
+                      <X className="h-3.5 w-3.5" />
                     </Button>
                   </div>
                 ))}
@@ -945,32 +1365,33 @@ export default function Dashboard() {
             {/* Add new email dialog */}
             <Dialog open={emailDialogOpen} onOpenChange={setEmailDialogOpen}>
               <DialogTrigger asChild>
-                <Button variant="outline" size="sm" className="w-full border-blue-200 text-blue-700 hover:bg-blue-50">
-                  <Plus className="w-4 h-4 mr-2" /> Add Email Alert
+                <Button variant="outline" size="sm" className="w-full">
+                  <Plus className="mr-2 h-4 w-4" /> Add email alert
                 </Button>
               </DialogTrigger>
               <DialogContent className="sm:max-w-md">
                 <DialogHeader>
-                  <DialogTitle>Add Email Alert</DialogTitle>
+                  <DialogTitle>Add email alert</DialogTitle>
                   <DialogDescription>
-                    Configure email notifications for alcohol alerts. You can choose which devices and alert types to receive.
+                    Choose devices and alert types for this recipient.
                   </DialogDescription>
                 </DialogHeader>
                 <div className="space-y-4 py-2">
                   <div>
-                    <label className="text-xs font-semibold text-slate-600 uppercase tracking-wider block mb-2">Email Address</label>
+                    <label className="mb-2 block text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                      Email address
+                    </label>
                     <Input
                       type="email"
                       placeholder="admin@example.com"
                       value={newEmail}
                       onChange={(e) => setNewEmail(e.target.value)}
-                      className="border-indigo-200 focus:border-blue-500 focus:ring-blue-500/20"
                     />
                   </div>
                   <div>
-                    <label className="text-xs font-semibold text-slate-600 uppercase tracking-wider block mb-2">Device</label>
+                    <label className="mb-2 block text-xs font-medium uppercase tracking-wide text-muted-foreground">Device</label>
                     <Select value={newEmailDevice} onValueChange={setNewEmailDevice}>
-                      <SelectTrigger className="w-full border-indigo-200 focus:border-blue-500 focus:ring-blue-500/20">
+                      <SelectTrigger className="w-full">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
@@ -982,7 +1403,9 @@ export default function Dashboard() {
                     </Select>
                   </div>
                   <div>
-                    <label className="text-xs font-semibold text-slate-600 uppercase tracking-wider block mb-2">Alert Types</label>
+                    <label className="mb-2 block text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                      Alert types
+                    </label>
                     <div className="flex gap-2">
                       {["WARNING", "DANGER"].map((type) => (
                         <button
@@ -993,12 +1416,12 @@ export default function Dashboard() {
                               prev.includes(type) ? prev.filter((t) => t !== type) : [...prev, type]
                             )
                           }
-                          className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                          className={`rounded-md border px-3 py-1.5 text-xs font-medium transition-colors ${
                             newEmailTypes.includes(type)
                               ? type === "DANGER"
-                                ? "bg-red-100 text-red-700 border border-red-200"
-                                : "bg-orange-100 text-orange-700 border border-orange-200"
-                              : "bg-slate-100 text-slate-500 border border-slate-200"
+                                ? "border-destructive/30 bg-destructive/10 text-destructive"
+                                : "border-amber-500/30 bg-amber-500/10 text-amber-900"
+                              : "border-border bg-muted/50 text-muted-foreground hover:bg-muted"
                           }`}
                         >
                           {type}
@@ -1012,13 +1435,12 @@ export default function Dashboard() {
                     </Button>
                     <Button
                       size="sm"
-                      className="bg-blue-600 hover:bg-blue-700 text-white"
                       onClick={() => {
                         handleAddNotification();
                         setEmailDialogOpen(false);
                       }}
                     >
-                      Add Email
+                      Add email
                     </Button>
                   </div>
                 </div>
@@ -1027,69 +1449,23 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Charts Section */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Line Chart */}
-          <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-6 shadow-lg shadow-indigo-100/50 border border-indigo-100/50">
-            <div className="mb-4">
-              <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
-                <span className="w-8 h-8 rounded-lg bg-blue-100 flex items-center justify-center">
-                  <Activity className="w-4 h-4 text-blue-600" />
-                </span>
-                Alcohol Levels Over Time
-              </h2>
-              <p className="text-sm text-slate-500 ml-10">Last 60 readings</p>
-            </div>
-            <div className="h-72">
-              {chartData.length === 0 ? (
-                <div className="h-full flex items-center justify-center text-slate-400 text-sm">
-                  No data to chart yet.
+        {/* Devices — incidents by device */}
+        <div id="devices" className="scroll-mt-24">
+          <div className="luxury-glass-panel">
+            <div className="mb-5">
+              <div className="flex items-start gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border bg-muted/60 text-primary">
+                  <AlertTriangle className="h-4 w-4" />
                 </div>
-              ) : (
-                <ResponsiveContainer width="100%" height="100%">
-                  <LineChart data={chartData} margin={{ top: 10, right: 16, left: -10, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                    <XAxis dataKey="time" tick={{ fontSize: 11 }} stroke="#64748b" />
-                    <YAxis tick={{ fontSize: 11 }} stroke="#64748b" domain={[0, "auto"]} />
-                    <Tooltip
-                      contentStyle={{
-                        background: "#ffffff",
-                        border: "1px solid #e2e8f0",
-                        borderRadius: "0.75rem",
-                        fontSize: 12,
-                        boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
-                      }}
-                    />
-                    <ReferenceLine y={0.02} stroke="#f97316" strokeDasharray="4 4" />
-                    <ReferenceLine y={0.05} stroke="#ef4444" strokeDasharray="4 4" />
-                    <Line
-                      type="monotone"
-                      dataKey="level"
-                      stroke="#3b82f6"
-                      strokeWidth={2.5}
-                      dot={{ r: 3, fill: "#3b82f6" }}
-                      activeDot={{ r: 5 }}
-                    />
-                  </LineChart>
-                </ResponsiveContainer>
-              )}
-            </div>
-          </div>
-
-          {/* Bar Chart */}
-          <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-6 shadow-lg shadow-indigo-100/50 border border-indigo-100/50">
-            <div className="mb-4">
-              <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
-                <span className="w-8 h-8 rounded-lg bg-purple-100 flex items-center justify-center">
-                  <AlertTriangle className="w-4 h-4 text-purple-600" />
-                </span>
-                Incidents per Device
-              </h2>
-              <p className="text-sm text-slate-500 ml-10">High and warning alerts by device</p>
+                <div>
+                  <h2 className="text-base font-semibold tracking-tight text-foreground">Incidents per device</h2>
+                  <p className="text-sm text-muted-foreground">High and warning counts by device</p>
+                </div>
+              </div>
             </div>
             <div className="h-72">
               {deviceIncidentData.length === 0 ? (
-                <div className="h-full flex items-center justify-center text-slate-400 text-sm">
+                <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                   No device data yet.
                 </div>
               ) : (
@@ -1117,57 +1493,57 @@ export default function Dashboard() {
         </div>
 
         {/* Alert Report Table */}
-        <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-6 shadow-lg shadow-indigo-100/50 border border-indigo-100/50">
-          <div className="flex items-center justify-between mb-6">
-            <div>
-              <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
-                <span className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center">
-                  <Activity className="w-4 h-4 text-indigo-600" />
-                </span>
-                Alert Report
-              </h2>
-              <p className="text-sm text-slate-500 ml-10">
-                {filtered.length} {filtered.length === 1 ? 'record' : 'records'}
-                {(dateFrom || dateTo || deviceFilter !== "all") && " (filtered)"}
-              </p>
+           <div className="luxury-glass-panel">
+          <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex items-start gap-3">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border bg-muted/60 text-primary">
+                <Activity className="h-4 w-4" />
+              </div>
+              <div>
+                <h2 className="text-base font-semibold tracking-tight text-foreground">Reading log</h2>
+                <p className="text-sm text-muted-foreground">
+                  {filtered.length} {filtered.length === 1 ? "record" : "records"}
+                  {(dateFrom || dateTo || deviceFilter !== "all") && " (filtered)"}
+                </p>
+              </div>
             </div>
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" className="border-red-200 text-red-700 hover:bg-red-50" onClick={handleDeleteAll} disabled={!filtered.length}>
-                <Trash2 className="w-4 h-4 mr-2" /> Delete All
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" onClick={handleDeleteAll} disabled={!filtered.length}>
+                <Trash2 className="mr-2 h-4 w-4" /> Delete all
               </Button>
-              <Button variant="outline" size="sm" className="border-indigo-200 text-indigo-700 hover:bg-indigo-50" onClick={exportCSV} disabled={!filtered.length}>
-                <Download className="w-4 h-4 mr-2" /> Export CSV
+              <Button variant="outline" size="sm" onClick={exportCSV} disabled={!filtered.length}>
+                <Download className="mr-2 h-4 w-4" /> Export CSV
               </Button>
             </div>
           </div>
 
           {loadingLogs ? (
-            <div className="text-center text-slate-400 py-12">Loading…</div>
+            <div className="py-12 text-center text-muted-foreground">Loading…</div>
           ) : filtered.length === 0 ? (
-            <div className="text-center text-slate-400 py-12">
-              <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-slate-100 flex items-center justify-center">
-                <Activity className="w-8 h-8 text-slate-400" />
+            <div className="py-12 text-center text-muted-foreground">
+              <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border bg-muted/50">
+                <Activity className="h-7 w-7 opacity-50" />
               </div>
-              <p className="font-medium">No records match your filters</p>
-              <p className="text-sm mt-1">Try adjusting your date range or device filter</p>
+              <p className="font-medium text-foreground">No records match your filters</p>
+              <p className="mt-1 text-sm">Try adjusting the date range or device</p>
             </div>
           ) : (
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto rounded-lg border">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-slate-200">
-                    <th className="text-left py-3 px-3 font-semibold text-slate-600 text-xs uppercase tracking-wider">#</th>
-                    <th className="text-left py-3 px-3 font-semibold text-slate-600 text-xs uppercase tracking-wider">Timestamp</th>
-                    <th className="text-left py-3 px-3 font-semibold text-slate-600 text-xs uppercase tracking-wider">Device</th>
-                    <th className="text-left py-3 px-3 font-semibold text-slate-600 text-xs uppercase tracking-wider">Alcohol Level</th>
-                    <th className="text-left py-3 px-3 font-semibold text-slate-600 text-xs uppercase tracking-wider">Concentration</th>
-                    <th className="text-left py-3 px-3 font-semibold text-slate-600 text-xs uppercase tracking-wider">Status</th>
-                    <th className="text-left py-3 px-3 font-semibold text-slate-600 text-xs uppercase tracking-wider">Severity</th>
-                    <th className="text-left py-3 px-3 font-semibold text-slate-600 text-xs uppercase tracking-wider">Action</th>
+                  <tr className="border-b bg-muted/50">
+                    <th className="px-3 py-3 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground">#</th>
+                    <th className="px-3 py-3 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground">Timestamp</th>
+                    <th className="px-3 py-3 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground">Device</th>
+                    <th className="px-3 py-3 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground">Alcohol level</th>
+                    <th className="px-3 py-3 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground">Concentration</th>
+                    <th className="px-3 py-3 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground">Status</th>
+                    <th className="px-3 py-3 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground">Severity</th>
+                    <th className="px-3 py-3 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground">Action</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filtered.slice(0, 200).map((log, index) => {
+                  {filtered.slice(0, 200).map((log) => {
                     const colors = statusColorClasses(log.status);
                     const percentage = Number(log.alcohol_level) * 100;
                     const statusLabel = log.status === "DANGER" ? "High" : log.status === "WARNING" ? "Elevated" : "Normal";
@@ -1175,39 +1551,39 @@ export default function Dashboard() {
                       <tr
                         key={log.id}
                         id={`log-row-${log.id}`}
-                        className="border-b border-slate-100 hover:bg-slate-50/50 transition-colors"
+                        className="border-b border-border transition-colors last:border-0 hover:bg-muted/40"
                       >
-                        <td className="py-3 px-3 text-slate-500 font-mono text-xs">{log.id}</td>
-                        <td className="py-3 px-3 text-slate-700 font-mono text-xs">{format(new Date(log.timestamp), "yyyy-MM-dd HH:mm:ss")}</td>
-                        <td className="py-3 px-3 text-slate-900 font-medium">{log.device_id}</td>
-                        <td className="py-3 px-3 text-slate-900 font-mono">{formatAlcoholLevel(log.alcohol_level)}</td>
-                        <td className="py-3 px-3 font-mono" style={{ color: log.status === 'DANGER' ? '#dc2626' : log.status === 'WARNING' ? '#f97316' : '#16a34a' }}>
+                        <td className="px-3 py-3 font-mono text-xs text-muted-foreground">{log.id}</td>
+                        <td className="px-3 py-3 font-mono text-xs text-foreground">{format(new Date(log.timestamp), "yyyy-MM-dd HH:mm:ss")}</td>
+                        <td className="px-3 py-3 font-medium text-foreground">{log.device_id}</td>
+                        <td className="px-3 py-3 font-mono text-foreground">{formatAlcoholLevel(log.alcohol_level)}</td>
+                        <td className="px-3 py-3 font-mono" style={{ color: log.status === 'DANGER' ? '#dc2626' : log.status === 'WARNING' ? '#f97316' : '#16a34a' }}>
                           {formatAlcoholPercentage(log.alcohol_level)}
                         </td>
-                        <td className="py-3 px-3">
-                          <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${colors.badge}`}>
+                        <td className="px-3 py-3">
+                          <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${colors.badge}`}>
                             {log.status}
                           </span>
                         </td>
-                        <td className="py-3 px-3">
+                        <td className="px-3 py-3">
                           <div className="flex items-center gap-2">
-                            <div className="w-20 bg-slate-200 rounded-full h-2 overflow-hidden">
+                            <div className="h-2 w-20 overflow-hidden rounded-full bg-muted">
                               <div
                                 className={`h-2 rounded-full ${colors.progress}`}
                                 style={{ width: `${Math.min(percentage, 100)}%` }}
                               />
                             </div>
-                            <span className="text-xs text-slate-500">{statusLabel}</span>
+                            <span className="text-xs text-muted-foreground">{statusLabel}</span>
                           </div>
                         </td>
-                        <td className="py-3 px-3">
+                        <td className="px-3 py-3">
                           <Button
                             variant="ghost"
                             size="sm"
-                            className="text-red-500 hover:text-red-700 hover:bg-red-50 h-8 w-8 p-0"
+                            className="h-8 w-8 p-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
                             onClick={() => handleDeleteLog(log.id)}
                           >
-                            <Trash2 className="w-4 h-4" />
+                            <Trash2 className="h-4 w-4" />
                           </Button>
                         </td>
                       </tr>
@@ -1218,15 +1594,133 @@ export default function Dashboard() {
             </div>
           )}
           {filtered.length > 200 && (
-            <div className="mt-6 p-4 bg-slate-50 rounded-xl border border-slate-200 text-center">
-              <p className="text-sm text-slate-600">
-                Showing <span className="font-semibold">200</span> of <span className="font-semibold">{filtered.length}</span> records
+            <div className="mt-4 rounded-lg border bg-muted/30 p-4 text-center">
+              <p className="text-sm text-muted-foreground">
+                Showing <span className="font-semibold text-foreground">200</span> of{" "}
+                <span className="font-semibold text-foreground">{filtered.length}</span> records
               </p>
-              <p className="text-xs text-slate-500 mt-1">Export CSV to view all data</p>
+              <p className="mt-1 text-xs text-muted-foreground">Export CSV to view all rows</p>
             </div>
           )}
         </div>
-      </main>
-    </div>
+            </>
+          )}
+
+          {section === "alerts" && (
+            <>
+              <div className="luxury-glass-panel">
+                <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border bg-muted/60 text-destructive">
+                      <Bell className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <h2 className="text-lg font-semibold tracking-tight text-foreground">Alerts</h2>
+                      <p className="text-sm text-muted-foreground">Recent system alerts</p>
+                    </div>
+                  </div>
+                  <div className="inline-flex rounded-lg border border-border bg-muted/40 p-0.5">
+                    <button
+                      type="button"
+                      className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                        alertView === "active" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                      }`}
+                      onClick={() => setAlertView("active")}
+                    >
+                      Active ({alerts.length})
+                    </button>
+                    <button
+                      type="button"
+                      className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                        alertView === "history" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                      }`}
+                      onClick={() => setAlertView("history")}
+                    >
+                      <History className="h-3.5 w-3.5" />
+                      History ({historyAlerts.length})
+                    </button>
+                  </div>
+                </div>
+
+                {alertView === "active" ? (
+                  alerts.length === 0 ? (
+                    <div className="py-12 text-center text-muted-foreground">
+                      <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border bg-muted/50">
+                        <Bell className="h-7 w-7 opacity-50" />
+                      </div>
+                      <p className="text-sm font-medium">No active alerts in the last 10 minutes</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {alerts.map((alert) => (
+                        <div
+                          key={alert.id}
+                          className={`flex items-center justify-between rounded-lg border p-4 ${
+                            alert.status === "DANGER"
+                              ? "border-destructive/25 bg-destructive/5"
+                              : "border-amber-500/25 bg-amber-500/[0.06]"
+                          }`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <div
+                              className={`h-2 w-2 shrink-0 rounded-full ${
+                                alert.status === "DANGER" ? "animate-pulse bg-destructive" : "bg-amber-500"
+                              }`}
+                            />
+                            <div>
+                              <p className="text-sm font-medium text-foreground">{alert.device_id}</p>
+                              <p className="text-xs text-muted-foreground">
+                                {formatAlcoholLevel(alert.alcohol_level)} — {alert.status}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-xs text-muted-foreground">{format(new Date(alert.created_at), "HH:mm:ss")}</p>
+                            {alert.acknowledged && <span className="text-xs font-medium text-emerald-600">Acknowledged</span>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                ) : historyAlerts.length === 0 ? (
+                  <div className="py-12 text-center text-muted-foreground">
+                    <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border bg-muted/50">
+                      <History className="h-7 w-7 opacity-50" />
+                    </div>
+                    <p className="text-sm font-medium">No alert history yet</p>
+                  </div>
+                ) : (
+                  <div className="max-h-[320px] space-y-2 overflow-y-auto pr-1">
+                    {historyAlerts.map((alert) => (
+                      <div
+                        key={alert.id}
+                        className={`flex items-center justify-between rounded-lg border p-4 ${
+                          alert.status === "DANGER" ? "border-destructive/20 bg-destructive/[0.04]" : "border-amber-500/20 bg-amber-500/[0.04]"
+                        }`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`h-2 w-2 shrink-0 rounded-full ${alert.status === "DANGER" ? "bg-destructive" : "bg-amber-500"}`} />
+                          <div>
+                            <p className="text-sm font-medium text-foreground">{alert.device_id}</p>
+                            <p className="text-xs text-muted-foreground">
+                              {formatAlcoholLevel(alert.alcohol_level)} — {alert.status}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-xs text-muted-foreground">{format(new Date(alert.created_at), "yyyy-MM-dd HH:mm")}</p>
+                          <p className="text-xs text-muted-foreground/80">Archived {format(new Date(alert.archived_at), "HH:mm")}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
+        </div>
+      </div>
+    </DashboardShell>
   );
 }

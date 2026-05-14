@@ -1,4 +1,5 @@
 import type { Config } from "tailwindcss";
+import tailwindcssAnimate from "tailwindcss-animate";
 
 export default {
   darkMode: ["class"],
@@ -50,6 +51,11 @@ export default {
             foreground: "hsl(var(--status-warning-foreground))",
             bg: "hsl(var(--status-warning-bg))",
           },
+          danger: {
+            DEFAULT: "hsl(var(--status-danger))",
+            foreground: "hsl(var(--status-danger-foreground))",
+            bg: "hsl(var(--status-danger-bg))",
+          },
           high: {
             DEFAULT: "hsl(var(--status-high))",
             foreground: "hsl(var(--status-high-foreground))",
@@ -97,12 +103,37 @@ export default {
             height: "0",
           },
         },
+        "cosmic-drift-a": {
+          "0%, 100%": { transform: "translate3d(0, 0, 0) scale(1)" },
+          "50%": { transform: "translate3d(2.5%, 1.5%, 0) scale(1.04)" },
+        },
+        "cosmic-drift-b": {
+          "0%, 100%": { transform: "translate3d(0, 0, 0) scale(1)" },
+          "50%": { transform: "translate3d(-2%, -2%, 0) scale(1.06)" },
+        },
+        "cosmic-drift-c": {
+          "0%, 100%": { transform: "translate3d(0, 0, 0) rotate(0deg)" },
+          "50%": { transform: "translate3d(1.5%, -1.5%, 0) rotate(2deg)" },
+        },
+        "cosmic-drift-slow": {
+          "0%, 100%": { transform: "translate3d(0, 0, 0)" },
+          "50%": { transform: "translate3d(-1%, 1%, 0)" },
+        },
+        "cosmic-twinkle": {
+          "0%, 100%": { opacity: "0.35", filter: "brightness(0.9)" },
+          "50%": { opacity: "1", filter: "brightness(1.35)" },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
+        "cosmic-drift-a": "cosmic-drift-a 85s ease-in-out infinite",
+        "cosmic-drift-b": "cosmic-drift-b 110s ease-in-out infinite",
+        "cosmic-drift-c": "cosmic-drift-c 95s ease-in-out infinite",
+        "cosmic-drift-slow": "cosmic-drift-slow 140s ease-in-out infinite",
+        "cosmic-twinkle": "cosmic-twinkle 4s ease-in-out infinite",
       },
     },
   },
-  plugins: [require("tailwindcss-animate")],
+  plugins: [tailwindcssAnimate],
 } satisfies Config;

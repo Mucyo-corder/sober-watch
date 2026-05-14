@@ -12,7 +12,7 @@ const SMTP_SECURE = process.env.SMTP_SECURE === "true";
 const SMTP_USER = process.env.SMTP_USER || "";
 const SMTP_PASS = process.env.SMTP_PASS || "";
 const EMAIL_FROM = process.env.EMAIL_FROM || "soberwatch@localhost";
-const ALERT_EMAIL = process.env.ALERT_EMAIL || "mucyophanie3@gmail.com";
+const ALERT_EMAIL = (process.env.ALERT_EMAIL || "").trim();
 
 const GAS_THRESHOLD = 300;
 
@@ -39,10 +39,15 @@ function getTransporter() {
 }
 
 export function isEmailConfigured() {
-  return !!SMTP_HOST && !!SMTP_USER && !!SMTP_PASS;
+  return !!(SMTP_HOST && SMTP_USER && SMTP_PASS && ALERT_EMAIL);
 }
 
 export async function sendGasAlertEmail(gasValue) {
+  if (!ALERT_EMAIL) {
+    console.error("📧 Cannot send email: set ALERT_EMAIL in .env");
+    return { success: false, error: "ALERT_EMAIL not configured" };
+  }
+
   const transport = getTransporter();
   if (!transport) {
     console.error("📧 Cannot send email: SMTP not configured");

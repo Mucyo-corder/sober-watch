@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { apiUrl } from "@/lib/apiBase";
 import { toast } from "sonner";
 import { Loader2 } from "lucide-react";
 
@@ -17,7 +18,7 @@ export default function AuthQR() {
       }
 
       try {
-        const response = await fetch(`${import.meta.env.VITE_API_BASE_URL}/api/auth/qr/verify`, {
+        const response = await fetch(apiUrl("/api/auth/qr/verify"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ token }),
@@ -46,10 +47,10 @@ export default function AuthQR() {
   }, [token, navigate]);
 
   return (
-    <div className="min-h-screen bg-gradient-hero flex items-center justify-center p-4">
+    <div className="relative flex h-full min-h-0 items-center justify-center overflow-y-auto bg-gradient-hero p-4">
       <div className="text-center">
-        <Loader2 className="w-12 h-12 animate-spin text-blue-600 mx-auto mb-4" />
-        <p className="text-slate-600">Authenticating via QR code...</p>
+        <Loader2 className="mx-auto mb-3 h-10 w-10 animate-spin text-primary" />
+        <p className="text-sm text-muted-foreground">Authenticating via QR code…</p>
       </div>
     </div>
   );

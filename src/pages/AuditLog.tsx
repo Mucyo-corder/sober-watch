@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { Shield, Clock, User, FileText, LogOut, RefreshCw } from "lucide-react";
-import { useAuth } from "@/hooks/useAuth";
+import { Clock, User, FileText, RefreshCw } from "lucide-react";
+import { apiUrl } from "@/lib/apiBase";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { format } from "date-fns";
+import { DashboardShell } from "@/components/DashboardShell";
 
 interface AuditEntry {
   id: number;
@@ -21,8 +20,6 @@ interface AuditEntry {
 }
 
 export default function AuditLog() {
-  const navigate = useNavigate();
-  const { user, signOut } = useAuth();
   const [logs, setLogs] = useState<AuditEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterAction, setFilterAction] = useState<string>("all");
@@ -34,14 +31,7 @@ export default function AuditLog() {
       if (filterAction !== "all") params.append("action", filterAction);
       if (filterEntity !== "all") params.append("entity_type", filterEntity);
 
-      const res = await fetch(
-        `${import.meta.env.VITE_API_BASE_URL}/api/audit?${params.toString()}`,
-        {
-          headers: {
-            Authorization: `Bearer ${localStorage.getItem("auth_token")}`,
-          },
-        }
-      );
+      const res = await fetch(`${apiUrl("/api/audit")}?${params.toString()}`);
       if (res.ok) {
         setLogs(await res.json());
       }
@@ -95,37 +85,34 @@ export default function AuditLog() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-indigo-50">
-      <header className="border-b bg-white/80 backdrop-blur-sm sticky top-0 z-40">
-        <div className="container max-w-7xl flex items-center justify-between h-16">
-          <div className="flex items-center gap-2">
-            <span className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center">
-              <Shield className="w-4 h-4 text-white" />
-            </span>
-            <span className="font-semibold text-slate-900">Audit Log</span>
+    <DashboardShell
+      activeNav="audit"
+      connected
+      breadcrumbs={
+        <>
+          <span className="font-medium text-foreground">SoberWatch</span>
+          <span className="mx-2 text-muted-foreground/50">/</span>
+          <span>Audit log</span>
+        </>
+      }
+    >
+      <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col">
+        <div className="min-h-0 flex-1 space-y-6 overflow-y-auto pb-2">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight text-foreground">System audit trail</h1>
+            <p className="mt-1 text-sm text-muted-foreground">Review authenticated actions across the system</p>
           </div>
-          <div className="flex items-center gap-2">
-            <span className="text-sm text-slate-600">{user?.email}</span>
-            <Button variant="ghost" size="icon" onClick={signOut}>
-              <LogOut className="w-4 h-4" />
-            </Button>
-          </div>
-        </div>
-      </header>
-
-      <main className="container max-w-7xl py-8">
-        <div className="flex items-center justify-between mb-6">
-          <h1 className="text-2xl font-bold text-slate-900">System Audit Trail</h1>
-          <Button onClick={handleRefresh} variant="outline" size="sm">
-            <RefreshCw className="w-4 h-4 mr-2" />
+          <Button onClick={handleRefresh} variant="outline" size="sm" className="w-fit">
+            <RefreshCw className="mr-2 h-4 w-4" />
             Refresh
           </Button>
         </div>
 
-        <Card className="p-6 mb-6">
+        <Card className="p-6 shadow-sm">
           <div className="flex flex-wrap gap-4">
-            <div className="flex-1 min-w-[200px]">
-              <label className="text-sm font-medium text-slate-700 mb-1 block">Filter by Action</label>
+            <div className="min-w-[200px] flex-1">
+              <label className="mb-2 block text-sm font-medium text-foreground">Filter by action</label>
               <Select value={filterAction} onValueChange={setFilterAction}>
                 <SelectTrigger>
                   <SelectValue />
@@ -140,8 +127,8 @@ export default function AuditLog() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="flex-1 min-w-[200px]">
-              <label className="text-sm font-medium text-slate-700 mb-1 block">Filter by Entity</label>
+            <div className="min-w-[200px] flex-1">
+              <label className="mb-2 block text-sm font-medium text-foreground">Filter by entity</label>
               <Select value={filterEntity} onValueChange={setFilterEntity}>
                 <SelectTrigger>
                   <SelectValue />
@@ -157,48 +144,48 @@ export default function AuditLog() {
           </div>
         </Card>
 
-        <Card className="overflow-hidden">
+        <Card className="overflow-hidden shadow-sm">
           {loading ? (
-            <div className="p-8 text-center text-slate-500">Loading audit logs...</div>
+            <div className="p-8 text-center text-sm text-muted-foreground">Loading audit logs…</div>
           ) : logs.length === 0 ? (
-            <div className="p-8 text-center text-slate-500">
-              <FileText className="w-12 h-12 mx-auto mb-2 text-slate-300" />
-              <p>No audit logs found</p>
+            <div className="p-8 text-center text-muted-foreground">
+              <FileText className="mx-auto mb-2 h-12 w-12 opacity-40" />
+              <p className="text-sm">No audit logs found</p>
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full">
-                <thead className="bg-slate-50 border-b">
+              <table className="w-full text-sm">
+                <thead className="border-b bg-muted/50">
                   <tr>
-                    <th className="text-left p-4 text-sm font-semibold text-slate-700">Timestamp</th>
-                    <th className="text-left p-4 text-sm font-semibold text-slate-700">User</th>
-                    <th className="text-left p-4 text-sm font-semibold text-slate-700">Action</th>
-                    <th className="text-left p-4 text-sm font-semibold text-slate-700">Entity</th>
-                    <th className="text-left p-4 text-sm font-semibold text-slate-700">Details</th>
-                    <th className="text-left p-4 text-sm font-semibold text-slate-700">IP Address</th>
+                    <th className="p-4 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground">Timestamp</th>
+                    <th className="p-4 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground">User</th>
+                    <th className="p-4 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground">Action</th>
+                    <th className="p-4 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground">Entity</th>
+                    <th className="p-4 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground">Details</th>
+                    <th className="p-4 text-left text-xs font-medium uppercase tracking-wide text-muted-foreground">IP address</th>
                   </tr>
                 </thead>
                 <tbody>
                   {logs.map((log) => (
-                    <tr key={log.id} className="border-b hover:bg-slate-50">
-                      <td className="p-4 text-sm text-slate-600">
+                    <tr key={log.id} className="border-b border-border transition-colors last:border-0 hover:bg-muted/30">
+                      <td className="p-4 text-muted-foreground">
                         <div className="flex items-center gap-2">
-                          <Clock className="w-3.5 h-3.5 text-slate-400" />
+                          <Clock className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
                           {format(new Date(log.created_at), "yyyy-MM-dd HH:mm:ss")}
                         </div>
                       </td>
-                      <td className="p-4 text-sm text-slate-900">
+                      <td className="p-4 text-foreground">
                         <div className="flex items-center gap-2">
-                          <User className="w-3.5 h-3.5 text-slate-400" />
+                          <User className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
                           {log.user_email}
                         </div>
                       </td>
                       <td className="p-4">
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${getActionColor(log.action)}`}>
+                        <span className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ${getActionColor(log.action)}`}>
                           {getActionLabel(log.action)}
                         </span>
                       </td>
-                      <td className="p-4 text-sm text-slate-600">
+                      <td className="p-4 text-muted-foreground">
                         {log.entity_type && (
                           <span className="capitalize">
                             {log.entity_type}
@@ -206,8 +193,8 @@ export default function AuditLog() {
                           </span>
                         )}
                       </td>
-                      <td className="p-4 text-sm text-slate-600 max-w-xs truncate">{log.details}</td>
-                      <td className="p-4 text-sm text-slate-500 font-mono">{log.ip_address || "-"}</td>
+                      <td className="max-w-xs truncate p-4 text-muted-foreground">{log.details}</td>
+                      <td className="p-4 font-mono text-xs text-muted-foreground">{log.ip_address || "—"}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -215,7 +202,8 @@ export default function AuditLog() {
             </div>
           )}
         </Card>
-      </main>
-    </div>
+        </div>
+      </div>
+    </DashboardShell>
   );
 }

@@ -6,7 +6,6 @@ import jwt from "jsonwebtoken";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import { pool, testConnection, closePool } from "./db.js";
-import { authRequired } from "./middleware.js";
 import { sendAlertEmail, isEmailConfigured } from "./email.js";
 import QRCode from "qrcode";
 import alertRoutes from "./routes/alertRoutes.js";
@@ -16,7 +15,37 @@ dotenv.config({ path: join(__dirname, "../.env") });
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
-const JWT_SECRET = process.env.JWT_SECRET || "your-secret-key-change-in-production";
+const JWT_SECRET = process.env.JWT_SECRET || "soberwatch_secret_key_change_in_production";
+
+/** Ensures email-notification table exists (older DBs may be missing it). */
+async function ensureNotificationSettingsSchema() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS notification_settings (
+        id SERIAL PRIMARY KEY,
+        device_id VARCHAR(50) NOT NULL DEFAULT 'all',
+        email VARCHAR(255) NOT NULL,
+        alert_types VARCHAR(20)[] NOT NULL DEFAULT '{"WARNING","DANGER"}',
+        enabled BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    await pool.query(`
+      ALTER TABLE notification_settings
+      ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE;
+    `);
+  } catch (e) {
+    console.error("ensureNotificationSettingsSchema:", e.message);
+  }
+}
+
+function pgErrorPayload(err, fallbackMessage) {
+  return {
+    error: fallbackMessage,
+    detail: err?.message || String(err),
+    code: err?.code,
+  };
+}
 
 // Store QR authentication tokens in memory (in production, use Redis or database)
 const qrAuthTokens = new Map();
@@ -44,21 +73,54 @@ function generateMockAlcoholLevel() {
 const allowedOrigins = [
   process.env.CLIENT_ORIGIN,
   "http://localhost:8080",
+  "http://localhost:8081",
+  "http://localhost:8082",
+  "http://localhost:8083",
+  "http://localhost:8084",
+  "http://localhost:8085",
   "http://localhost:5173",
   "http://127.0.0.1:8080",
+  "http://127.0.0.1:8081",
+  "http://127.0.0.1:8082",
+  "http://127.0.0.1:8083",
+  "http://127.0.0.1:8084",
+  "http://127.0.0.1:8085",
   "http://127.0.0.1:5173",
   "http://127.0.0.1:54670",
 ].filter(Boolean);
 
+function isAllowedCorsOrigin(origin) {
+  if (!origin) return true;
+  if (allowedOrigins.includes(origin)) return true;
+  try {
+    const { hostname } = new URL(origin);
+    if (hostname === "localhost" || hostname === "127.0.0.1") return true;
+    // Vite "Network" URL (phone / another PC on LAN)
+    if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(hostname)) return true;
+    if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) return true;
+    if (/^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(hostname)) return true;
+  } catch {
+    /* ignore */
+  }
+  return false;
+}
+
+// Never use callback(null, false) — cors treats !origin as failure and calls next(err), which hits
+// the global error handler and becomes 500 "Internal server error" (including on POST /api/auth/signup).
 app.use(
   cors({
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error("Not allowed by CORS"));
+    origin(origin, callback) {
+      if (isAllowedCorsOrigin(origin)) {
+        return callback(null, true);
       }
+      if (process.env.NODE_ENV !== "production") {
+        return callback(null, true);
+      }
+      return callback(new Error("Not allowed by CORS"));
     },
+    methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    optionsSuccessStatus: 204,
   })
 );
 app.use(express.json());
@@ -153,21 +215,26 @@ async function getBaselineInfo(deviceId, alcoholLevel) {
   }
 }
 
-// Automatically archive alerts older than 10 minutes to history table
+// Automatically archive alerts older than 5 minutes to history table
 async function archiveOldAlerts() {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query(`
+    const result = await client.query(`
+      WITH to_archive AS (
+        DELETE FROM alerts
+        WHERE created_at < NOW() - INTERVAL '5 minutes'
+        RETURNING log_id, device_id, alcohol_level, status, acknowledged, acknowledged_at, acknowledged_by, created_at
+      )
       INSERT INTO alerts_history (log_id, device_id, alcohol_level, status, acknowledged, acknowledged_at, acknowledged_by, created_at)
       SELECT log_id, device_id, alcohol_level, status, acknowledged, acknowledged_at, acknowledged_by, created_at
-      FROM alerts
-      WHERE created_at < NOW() - INTERVAL '10 minutes'
+      FROM to_archive
+      RETURNING id;
     `);
-    await client.query(`
-      DELETE FROM alerts
-      WHERE created_at < NOW() - INTERVAL '10 minutes'
-    `);
+    const count = result.rowCount;
+    if (count > 0) {
+      console.log(`[Archive] ${count} alert(s) moved to history`);
+    }
     await client.query("COMMIT");
   } catch (err) {
     await client.query("ROLLBACK");
@@ -190,28 +257,60 @@ async function auditLog(action, entityType, entityId, userId, userEmail, details
   }
 }
 
-// Auth: Admin Signup
-app.post("/api/auth/signup", async (req, res) => {
-  const { email, password } = req.body ?? {};
-  if (!email || !password) {
-    return res.status(400).json({ error: "Email and password are required" });
+/** When JWT auth is off, audit entries use anonymous actor. */
+function auditActor(req) {
+  const u = req.user;
+  return { id: u?.id ?? null, email: u?.email ?? "anonymous" };
+}
+
+function parseCredentials(body) {
+  const emailRaw = body?.email;
+  const passwordRaw = body?.password;
+  if (typeof emailRaw !== "string" || typeof passwordRaw !== "string") {
+    return { error: "Email and password are required" };
   }
+  const email = emailRaw.trim().toLowerCase();
+  if (!email || !passwordRaw) {
+    return { error: "Email and password are required" };
+  }
+  return { email, password: passwordRaw };
+}
+
+async function verifyPassword(plain, passwordHash) {
+  if (typeof passwordHash !== "string" || passwordHash.length < 10) {
+    return false;
+  }
+  try {
+    return await bcrypt.compare(plain, passwordHash);
+  } catch {
+    return false;
+  }
+}
+
+// Auth: Signup — stores bcrypt-hashed password in PostgreSQL (first user becomes admin)
+app.post("/api/auth/signup", async (req, res) => {
+  const parsed = parseCredentials(req.body);
+  if ("error" in parsed) {
+    return res.status(400).json({ error: parsed.error });
+  }
+  const { email, password } = parsed;
 
   try {
-    // Check if user already exists
-    const existing = await pool.query("SELECT id FROM users WHERE email = $1", [email.toLowerCase()]);
+    const existing = await pool.query("SELECT id FROM users WHERE email = $1", [email]);
     if (existing.rows.length > 0) {
       return res.status(409).json({ error: "Email already registered" });
     }
 
-    // Hash password
+    const countResult = await pool.query("SELECT COUNT(*)::int AS c FROM users");
+    const isFirstUser = Number(countResult.rows[0]?.c ?? 0) === 0;
+    const role = isFirstUser ? "admin" : "user";
+
     const saltRounds = 10;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-    // Insert user into database
     const result = await pool.query(
       "INSERT INTO users (email, password, role) VALUES ($1, $2, $3) RETURNING id, email, role",
-      [email.toLowerCase(), hashedPassword, "admin"]
+      [email, hashedPassword, role]
     );
     const user = result.rows[0];
 
@@ -223,40 +322,38 @@ app.post("/api/auth/signup", async (req, res) => {
       user.id,
       user.id,
       user.email,
-      "New admin account created",
+      "New account registered",
       req.ip || req.socket.remoteAddress
     );
 
     return res.status(201).json({ token, user: { id: user.id, email: user.email, role: user.role } });
   } catch (err) {
     console.error("Signup error:", err);
+    if (err?.code === "23505") {
+      return res.status(409).json({ error: "Email already registered" });
+    }
     return res.status(500).json({ error: "Failed to create user" });
   }
 });
 
 // Auth: Login
 app.post("/api/auth/login", async (req, res) => {
-  const { email, password } = req.body ?? {};
-  if (!email || !password) {
-    return res.status(400).json({ error: "Email and password are required" });
+  const parsed = parseCredentials(req.body);
+  if ("error" in parsed) {
+    return res.status(400).json({ error: parsed.error });
   }
+  const { email, password } = parsed;
 
   try {
-    const result = await pool.query("SELECT id, email, password, role FROM users WHERE email = $1", [email.toLowerCase()]);
+    const result = await pool.query("SELECT id, email, password, role FROM users WHERE email = $1", [email]);
     const user = result.rows[0];
     if (!user) {
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
-    // Verify password
-    const validPassword = await bcrypt.compare(password, user.password);
+    const validPassword = await verifyPassword(password, user.password);
     if (!validPassword) {
       return res.status(401).json({ error: "Invalid credentials" });
-    }
-
-    // Check if admin
-    if (user.role !== "admin") {
-      return res.status(403).json({ error: "Only admin accounts can access the dashboard" });
     }
 
     // Generate token
@@ -356,6 +453,127 @@ app.get("/api/logs", async (_req, res) => {
   return res.json(result.rows);
 });
 
+// ─── Weekly / Monthly Report API ───────────────────────────────────────────
+
+// GET /api/reports/weekly?year=2026&month=5&device=DEVICE-001
+// Returns totals per status + per-device breakdown for the specified month
+app.get("/api/reports/weekly", async (req, res) => {
+  try {
+    const { year, month, device } = req.query;
+    if (!year || !month) {
+      return res.status(400).json({ error: "year and month query params are required" });
+    }
+    const y = Number(year);
+    const m = Number(month);
+    if (Number.isNaN(y) || Number.isNaN(m) || m < 1 || m > 12) {
+      return res.status(400).json({ error: "Invalid year or month" });
+    }
+
+    // Build date range for the entire month
+    const startDate = new Date(y, m - 1, 1);
+    const endDate = new Date(y, m, 1); // first day of next month (exclusive)
+
+    let baseQuery = `
+      SELECT device_id, status, COUNT(*)::integer AS count
+      FROM logs
+      WHERE timestamp >= $1 AND timestamp < $2
+    `;
+    let params = [startDate.toISOString(), endDate.toISOString()];
+
+    if (device) {
+      baseQuery += ` AND device_id = $3`;
+      params.push(device);
+    }
+
+    baseQuery += ` GROUP BY device_id, status ORDER BY device_id, status`;
+
+    const result = await pool.query(baseQuery, params);
+
+    // Aggregate per device and overall
+    const perDevice = {};
+    let overall = { SAFE: 0, WARNING: 0, DANGER: 0, total: 0 };
+
+    for (const row of result.rows) {
+      const dev = row.device_id;
+      const status = row.status;
+      const count = Number(row.count);
+
+      if (!perDevice[dev]) {
+        perDevice[dev] = { SAFE: 0, WARNING: 0, DANGER: 0, total: 0 };
+      }
+      perDevice[dev][status] = count;
+      perDevice[dev].total += count;
+      overall[status] += count;
+      overall.total += count;
+    }
+
+    return res.json({
+      period: { year: y, month: m, startDate: startDate.toISOString(), endDate: endDate.toISOString() },
+      overall,
+      perDevice,
+    });
+  } catch (err) {
+    console.error("Weekly report error:", err);
+    return res.status(500).json(pgErrorPayload(err, "Failed to generate weekly report"));
+  }
+});
+
+// GET /api/reports/monthly?year=2026&device=DEVICE-001
+// Returns monthly totals across all months or per-device per month
+app.get("/api/reports/monthly", async (req, res) => {
+  try {
+    const { year, device } = req.query;
+    if (!year) {
+      return res.status(400).json({ error: "year query param is required" });
+    }
+    const y = Number(year);
+    if (Number.isNaN(y)) {
+      return res.status(400).json({ error: "Invalid year" });
+    }
+
+    let baseQuery = `
+      SELECT DATE_TRUNC('month', timestamp) AS month, device_id, status, COUNT(*)::integer AS count
+      FROM logs
+      WHERE EXTRACT(YEAR FROM timestamp) = $1
+    `;
+    let params = [y];
+
+    if (device) {
+      baseQuery += ` AND device_id = $2`;
+      params.push(device);
+    }
+
+    baseQuery += ` GROUP BY DATE_TRUNC('month', timestamp), device_id, status ORDER BY month, device_id`;
+
+    const result = await pool.query(baseQuery, params);
+
+    const perMonth = {};
+
+    for (const row of result.rows) {
+      const monthKey = new Date(row.month).toISOString().slice(0, 7); // "YYYY-MM"
+      const dev = row.device_id;
+      const status = row.status;
+      const count = Number(row.count);
+
+      if (!perMonth[monthKey]) {
+        perMonth[monthKey] = { devices: {}, overall: { SAFE: 0, WARNING: 0, DANGER: 0, total: 0 } };
+      }
+      if (!perMonth[monthKey].devices[dev]) {
+        perMonth[monthKey].devices[dev] = { SAFE: 0, WARNING: 0, DANGER: 0, total: 0 };
+      }
+      perMonth[monthKey].devices[dev][status] = count;
+      perMonth[monthKey].devices[dev].total += count;
+      perMonth[monthKey].overall[status] += count;
+      perMonth[monthKey].overall.total += count;
+    }
+
+    return res.json({ year: y, perMonth });
+  } catch (err) {
+    console.error("Monthly report error:", err);
+    return res.status(500).json(pgErrorPayload(err, "Failed to generate monthly report"));
+  }
+});
+
 app.get("/api/public/logs", async (req, res) => {
   const { device } = req.query;
   let query = `
@@ -402,7 +620,7 @@ app.get("/api/alerts/history", async (_req, res) => {
   return res.json(result.rows);
 });
 
-app.get("/api/audit", authRequired, async (req, res) => {
+app.get("/api/audit", async (req, res) => {
   const { action, entity_type, user_id } = req.query;
   let where = "";
   let params = [];
@@ -435,10 +653,10 @@ app.get("/api/audit", authRequired, async (req, res) => {
   return res.json(result.rows);
 });
 
-app.patch("/api/alerts/:id/acknowledge", authRequired, async (req, res) => {
+app.patch("/api/alerts/:id/acknowledge", async (req, res) => {
   const { id } = req.params;
   const { acknowledged_by } = req.body ?? {};
-  const user = req.user;
+  const actor = auditActor(req);
 
   const query = `
     UPDATE alerts
@@ -458,8 +676,8 @@ app.patch("/api/alerts/:id/acknowledge", authRequired, async (req, res) => {
     "acknowledge_alert",
     "alert",
     alert.id,
-    user.id,
-    user.email,
+    actor.id,
+    actor.email,
     `Acknowledged alert for device ${alert.device_id} with status ${alert.status}`,
     req.ip || req.socket.remoteAddress
   );
@@ -468,9 +686,9 @@ app.patch("/api/alerts/:id/acknowledge", authRequired, async (req, res) => {
 });
 
 // Delete a single log and its associated alert
-app.delete("/api/logs/:id", authRequired, async (req, res) => {
+app.delete("/api/logs/:id", async (req, res) => {
   const { id } = req.params;
-  const user = req.user;
+  const actor = auditActor(req);
   try {
     // Delete associated alert first (if any)
     await pool.query("DELETE FROM alerts WHERE log_id = $1", [id]);
@@ -484,8 +702,8 @@ app.delete("/api/logs/:id", authRequired, async (req, res) => {
       "delete_log",
       "log",
       Number(id),
-      user.id,
-      user.email,
+      actor.id,
+      actor.email,
       `Deleted log entry ID ${id}`,
       req.ip || req.socket.remoteAddress
     );
@@ -498,8 +716,8 @@ app.delete("/api/logs/:id", authRequired, async (req, res) => {
 });
 
 // Delete all logs and alerts
-app.delete("/api/logs", authRequired, async (req, res) => {
-  const user = req.user;
+app.delete("/api/logs", async (req, res) => {
+  const actor = auditActor(req);
   try {
     await pool.query("TRUNCATE logs RESTART IDENTITY CASCADE");
 
@@ -507,8 +725,8 @@ app.delete("/api/logs", authRequired, async (req, res) => {
       "delete_all_logs",
       "log",
       null,
-      user.id,
-      user.email,
+      actor.id,
+      actor.email,
       "Cleared all logs and alerts",
       req.ip || req.socket.remoteAddress
     );
@@ -534,11 +752,17 @@ app.post("/api/auth/qr/generate", async (req, res) => {
         return res.status(404).json({ error: "User not found" });
       }
     } else {
-      // No email provided — use the first admin user
-      const result = await pool.query("SELECT id, email, role FROM users WHERE role = $1 LIMIT 1", ["admin"]);
+      let result = await pool.query(
+        "SELECT id, email, role FROM users WHERE role = $1 ORDER BY id ASC LIMIT 1",
+        ["admin"]
+      );
       user = result.rows[0];
       if (!user) {
-        return res.status(404).json({ error: "No admin account found. Please sign up first." });
+        result = await pool.query("SELECT id, email, role FROM users ORDER BY id ASC LIMIT 1");
+        user = result.rows[0];
+      }
+      if (!user) {
+        return res.status(404).json({ error: "No accounts yet. Create an account with email and password first." });
       }
     }
 
@@ -550,6 +774,7 @@ app.post("/api/auth/qr/generate", async (req, res) => {
     qrAuthTokens.set(token, {
       userId: user.id,
       email: user.email,
+      role: user.role,
       expiresAt,
     });
 
@@ -594,7 +819,7 @@ app.post("/api/auth/qr/verify", async (req, res) => {
 
   // Generate JWT token
   const jwtToken = jwt.sign(
-    { id: authData.userId, email: authData.email, role: "admin" },
+    { id: authData.userId, email: authData.email, role: authData.role ?? "user" },
     JWT_SECRET,
     { expiresIn: "7d" }
   );
@@ -604,13 +829,8 @@ app.post("/api/auth/qr/verify", async (req, res) => {
 
   return res.json({
     token: jwtToken,
-    user: { id: authData.userId, email: authData.email, role: "admin" }
+    user: { id: authData.userId, email: authData.email, role: authData.role ?? "user" }
   });
-});
-
-app.use((err, _req, res, _next) => {
-  console.error(err);
-  return res.status(500).json({ error: "Internal server error" });
 });
 
 // ─── Baseline Auto-Learning API ───────────────────────────────────────────
@@ -649,7 +869,7 @@ app.get("/api/baselines/:deviceId", async (req, res) => {
 });
 
 // Update deviation threshold for a device
-app.patch("/api/baselines/:deviceId", authRequired, async (req, res) => {
+app.patch("/api/baselines/:deviceId", async (req, res) => {
   const { deviceId } = req.params;
   const { deviation_threshold } = req.body ?? {};
   if (deviation_threshold === undefined) {
@@ -672,7 +892,7 @@ app.patch("/api/baselines/:deviceId", authRequired, async (req, res) => {
 });
 
 // Recalculate baselines from all historical logs (re-train)
-app.post("/api/baselines/recalculate", authRequired, async (_req, res) => {
+app.post("/api/baselines/recalculate", async (_req, res) => {
   try {
     // Delete existing baselines
     await pool.query("DELETE FROM device_baselines");
@@ -717,7 +937,29 @@ app.get("/api/notifications", async (_req, res) => {
     return res.json(result.rows);
   } catch (err) {
     console.error("Get notifications error:", err);
-    return res.status(500).json({ error: "Failed to fetch notification settings" });
+    return res.status(500).json(pgErrorPayload(err, "Failed to fetch notification settings"));
+  }
+});
+
+// Get a single notification setting by ID
+app.get("/api/notifications/:id", async (req, res) => {
+  const id = Number.parseInt(String(req.params.id), 10);
+  if (Number.isNaN(id)) {
+    return res.status(400).json({ error: "Invalid notification id" });
+  }
+  try {
+    const result = await pool.query(
+      `SELECT id, device_id, email, alert_types, enabled, created_at
+       FROM notification_settings WHERE id = $1`,
+      [id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Notification setting not found" });
+    }
+    return res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Get notification error:", err);
+    return res.status(500).json(pgErrorPayload(err, "Failed to fetch notification setting"));
   }
 });
 
@@ -737,39 +979,65 @@ app.post("/api/notifications", async (req, res) => {
     return res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error("Create notification error:", err);
-    return res.status(500).json({ error: "Failed to create notification setting" });
+    return res.status(500).json(pgErrorPayload(err, "Failed to create notification setting"));
   }
 });
 
 // Update a notification setting (public for testing)
 app.patch("/api/notifications/:id", async (req, res) => {
-  const { id } = req.params;
+  const id = Number.parseInt(String(req.params.id), 10);
+  if (Number.isNaN(id)) {
+    return res.status(400).json({ error: "Invalid notification id" });
+  }
   const { device_id, email, alert_types, enabled } = req.body ?? {};
   try {
     const existing = await pool.query("SELECT * FROM notification_settings WHERE id = $1", [id]);
     if (existing.rows.length === 0) {
       return res.status(404).json({ error: "Notification setting not found" });
     }
+
+    const sets = [];
+    const vals = [];
+    let p = 1;
+    if (device_id !== undefined) {
+      sets.push(`device_id = $${p++}`);
+      vals.push(device_id);
+    }
+    if (email !== undefined) {
+      sets.push(`email = $${p++}`);
+      vals.push(email);
+    }
+    if (alert_types !== undefined) {
+      sets.push(`alert_types = $${p++}`);
+      vals.push(alert_types);
+    }
+    if (enabled !== undefined) {
+      sets.push(`enabled = $${p++}`);
+      vals.push(enabled);
+    }
+
+    if (sets.length === 0) {
+      return res.json(existing.rows[0]);
+    }
+
+    vals.push(id);
     const result = await pool.query(
-      `UPDATE notification_settings
-       SET device_id = COALESCE($2, device_id),
-           email = COALESCE($3, email),
-           alert_types = COALESCE($4, alert_types),
-           enabled = COALESCE($5, enabled)
-       WHERE id = $1
-       RETURNING id, device_id, email, alert_types, enabled, created_at`,
-      [id, device_id ?? null, email ?? null, alert_types ?? null, enabled ?? null]
+      `UPDATE notification_settings SET ${sets.join(", ")} WHERE id = $${p} RETURNING id, device_id, email, alert_types, enabled, created_at`,
+      vals
     );
     return res.json(result.rows[0]);
   } catch (err) {
     console.error("Update notification error:", err);
-    return res.status(500).json({ error: "Failed to update notification setting" });
+    return res.status(500).json(pgErrorPayload(err, "Failed to update notification setting"));
   }
 });
 
 // Delete a notification setting (public for testing)
 app.delete("/api/notifications/:id", async (req, res) => {
-  const { id } = req.params;
+  const id = Number.parseInt(String(req.params.id), 10);
+  if (Number.isNaN(id)) {
+    return res.status(400).json({ error: "Invalid notification id" });
+  }
   try {
     const result = await pool.query("DELETE FROM notification_settings WHERE id = $1 RETURNING id", [id]);
     if (result.rows.length === 0) {
@@ -778,7 +1046,7 @@ app.delete("/api/notifications/:id", async (req, res) => {
     return res.json({ deleted: true });
   } catch (err) {
     console.error("Delete notification error:", err);
-    return res.status(500).json({ error: "Failed to delete notification setting" });
+    return res.status(500).json(pgErrorPayload(err, "Failed to delete notification setting"));
   }
 });
 
@@ -798,6 +1066,14 @@ app.get("/api/test-email", async (_req, res) => {
   }
 });
 
+app.use((err, _req, res, _next) => {
+  if (err && err.message === "Not allowed by CORS") {
+    return res.status(403).json({ error: "Not allowed by CORS" });
+  }
+  console.error(err);
+  return res.status(500).json({ error: "Internal server error" });
+});
+
 // Start server and test database connection
 const server = app.listen(port, async () => {
   console.log(`\n🚀 API listening on http://localhost:${port}\n`);
@@ -813,8 +1089,27 @@ const server = app.listen(port, async () => {
     console.error("  2. The 'soberwatch' database exists");
     console.error("  3. DATABASE_URL is correct in .env");
     console.error("\nServer is running but database queries will fail.\n");
+  } else {
+    await ensureNotificationSettingsSchema();
+    console.log("✓ notification_settings table ready\n");
+    
+    // Run initial archive on startup to clean any old alerts
+    try {
+      await archiveOldAlerts();
+    } catch (e) {
+      console.error("Initial archive failed:", e.message);
+    }
   }
 });
+
+// Background job: archive old alerts every minute
+const ARCHIVE_INTERVAL_MS = 60 * 1000; // 1 minute
+setInterval(() => {
+  archiveOldAlerts().catch((err) => {
+    console.error("Scheduled archive failed:", err.message);
+  });
+}, ARCHIVE_INTERVAL_MS);
+console.log(`[Scheduler] Alert archive job configured (every ${ARCHIVE_INTERVAL_MS / 1000}s)`);
 
 // Graceful shutdown
 process.on("SIGINT", async () => {

@@ -10,6 +10,13 @@ export default defineConfig(({ mode }) => ({
     hmr: {
       overlay: false,
     },
+    proxy: {
+      // Same-origin /api in dev → no browser CORS (backend may still be on :4000)
+      "/api": {
+        target: "http://127.0.0.1:4000",
+        changeOrigin: true,
+      },
+    },
   },
   plugins: [react()],
   resolve: {

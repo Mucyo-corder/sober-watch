@@ -2,6 +2,10 @@ import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ArrowLeft, Cpu } from "lucide-react";
+import { getApiBaseUrl } from "@/lib/apiBase";
+import { DashboardShell } from "@/components/DashboardShell";
+
+const deviceApiBase = getApiBaseUrl() || "http://YOUR_PC_LAN_IP:4000";
 
 const arduinoSketch = `#include <WiFi.h>
 #include <HTTPClient.h>
@@ -13,7 +17,7 @@ const char* WIFI_SSID     = "YOUR_WIFI_SSID";
 const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 
 // Backend API endpoint
-const char* API_BASE_URL = "${import.meta.env.VITE_API_BASE_URL}";
+const char* API_BASE_URL = "${deviceApiBase}";
 
 const char* DEVICE_ID = "gate-1";          // Unique per device
 const int   MQ3_PIN   = 34;                 // Analog input
@@ -84,30 +88,41 @@ void loop() {
 
 export default function Setup() {
   return (
-    <div className="min-h-screen">
-      <header className="border-b bg-card/80 backdrop-blur sticky top-0 z-40">
-        <div className="container max-w-5xl flex items-center justify-between h-16">
-          <Link to="/" className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground">
-            <ArrowLeft className="w-4 h-4" /> Back to dashboard
-          </Link>
-          <div className="flex items-center gap-2">
-            <Cpu className="w-4 h-4 text-primary" />
-            <span className="font-semibold">Device setup</span>
-          </div>
-        </div>
-      </header>
+    <DashboardShell
+      activeNav="setup"
+      connected
+      breadcrumbs={
+        <>
+          <span className="font-medium text-foreground">SoberWatch</span>
+          <span className="mx-2 text-muted-foreground/50">/</span>
+          <span>Device setup</span>
+        </>
+      }
+    >
+      <div className="mx-auto flex min-h-0 w-full max-w-7xl flex-1 flex-col">
+        <div className="min-h-0 flex-1 overflow-y-auto pb-2">
+          <div className="mx-auto w-full max-w-3xl space-y-6">
+        <Link
+          to="/"
+          className="inline-flex items-center gap-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <ArrowLeft className="h-4 w-4" /> Back to dashboard
+        </Link>
 
-      <main className="container max-w-3xl py-10 space-y-6">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Cpu className="h-4 w-4 text-primary" />
+          <span>ESP32 &amp; sensor configuration</span>
+        </div>
+
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">ESP32 setup guide</h1>
-          <p className="text-muted-foreground mt-2">
-            Flash your ESP32 with the sketch below. Each reading is POSTed directly to
-            your backend API endpoint.
+          <h1 className="text-3xl font-semibold tracking-tight text-foreground">ESP32 setup</h1>
+          <p className="mt-2 max-w-2xl text-muted-foreground">
+            Flash your ESP32 with the sketch below. Each reading is POSTed directly to your backend API endpoint.
           </p>
         </div>
 
-        <Card className="p-6">
-          <h2 className="font-semibold mb-3">1. Hardware</h2>
+        <Card className="p-6 shadow-sm">
+          <h2 className="mb-3 text-base font-semibold text-foreground">1. Hardware</h2>
           <ul className="text-sm text-muted-foreground space-y-1.5 list-disc pl-5">
             <li>ESP32 dev board (any variant with Wi-Fi)</li>
             <li>MQ-3 alcohol sensor (or compatible analog gas sensor)</li>
@@ -115,17 +130,17 @@ export default function Setup() {
           </ul>
         </Card>
 
-        <Card className="p-6">
-          <h2 className="font-semibold mb-3">2. Arduino libraries</h2>
+        <Card className="p-6 shadow-sm">
+          <h2 className="mb-3 text-base font-semibold text-foreground">2. Arduino libraries</h2>
           <p className="text-sm text-muted-foreground">
             Install via Library Manager: <strong>WiFi</strong>, <strong>HTTPClient</strong>,{" "}
             <strong>ArduinoJson</strong>.
           </p>
         </Card>
 
-        <Card className="p-6">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="font-semibold">3. Sketch</h2>
+        <Card className="p-6 shadow-sm">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h2 className="text-base font-semibold text-foreground">3. Sketch</h2>
             <Button
               size="sm"
               variant="outline"
@@ -140,13 +155,13 @@ export default function Setup() {
             The endpoint is pre-filled for this project. Just set your Wi-Fi
             credentials and the device ID.
           </p>
-          <pre className="text-xs bg-muted/60 border rounded-lg p-4 overflow-auto max-h-[480px] font-mono leading-relaxed">
+          <pre className="max-h-[480px] overflow-auto rounded-lg border bg-muted/40 p-4 font-mono text-xs leading-relaxed">
             {arduinoSketch}
           </pre>
         </Card>
 
-        <Card className="p-6">
-          <h2 className="font-semibold mb-3">4. Granting dashboard access</h2>
+        <Card className="p-6 shadow-sm">
+          <h2 className="mb-3 text-base font-semibold text-foreground">4. Granting dashboard access</h2>
           <p className="text-sm text-muted-foreground">
             Users with <code className="font-mono text-foreground">role = 'admin'</code>{" "}
             in the PostgreSQL <code className="font-mono text-foreground">users</code>{" "}
@@ -154,15 +169,17 @@ export default function Setup() {
           </p>
         </Card>
 
-        <Card className="p-6">
-          <h2 className="font-semibold mb-3">5. Data classification</h2>
+        <Card className="p-6 shadow-sm">
+          <h2 className="mb-3 text-base font-semibold text-foreground">5. Data classification</h2>
           <ul className="text-sm space-y-1.5">
             <li><span className="inline-block w-2 h-2 rounded-full bg-status-safe mr-2 align-middle" /> SAFE: 0.00 – 0.03</li>
             <li><span className="inline-block w-2 h-2 rounded-full bg-status-warning mr-2 align-middle" /> WARNING: 0.04 – 0.07</li>
             <li><span className="inline-block w-2 h-2 rounded-full bg-status-high mr-2 align-middle" /> HIGH: 0.08 and above</li>
           </ul>
         </Card>
-      </main>
-    </div>
+          </div>
+        </div>
+      </div>
+    </DashboardShell>
   );
 }

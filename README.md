@@ -14,18 +14,9 @@ This project now uses:
 \i server/sql/schema.sql
 ```
 
-3. Create an admin user (password hash generated with bcrypt):
+3. Create accounts through the app: open the frontend, go to **Sign up**, and register with any email and password. Credentials are stored in PostgreSQL (bcrypt-hashed). The first registered user is assigned the `admin` role; later users are `user`. All registered users can sign in and use the dashboard.
 
-```bash
-node -e "import bcrypt from 'bcryptjs'; bcrypt.hash('admin123', 10).then(h => console.log(h))"
-```
-
-Then insert:
-
-```sql
-INSERT INTO users (email, password, role)
-VALUES ('admin@soberwatch.local', '<PASTE_HASH_HERE>', 'admin');
-```
+   (Optional) You can still insert a user manually with SQL if you prefer not to use the UI.
 
 ## 2) Backend setup
 
@@ -73,12 +64,15 @@ Frontend runs at `http://localhost:5173`.
   - Status is computed server-side (`SAFE`, `WARNING`, `HIGH`)
 
 - `GET /api/logs`
-  - Admin only (JWT bearer token)
-  - Returns logs ordered newest first
+  - Returns logs ordered newest first (no auth required in current build)
+
+- `POST /api/auth/signup`
+  - Body: `{ "email": "...", "password": "..." }`
+  - Creates a user in the database and returns a JWT
 
 - `POST /api/auth/login`
   - Body: `{ "email": "...", "password": "..." }`
-  - Returns JWT and user details for admin users
+  - Returns JWT and user details when the password matches the stored hash
 
 ## 5) ESP32 integration
 

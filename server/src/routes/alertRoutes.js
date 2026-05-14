@@ -41,7 +41,7 @@ router.get("/alert/test", async (req, res) => {
       success: true,
       message: "Test email sent",
       testValue,
-      recipient: process.env.ALERT_EMAIL || "mucyophanie3@gmail.com",
+      recipient: process.env.ALERT_EMAIL || null,
     });
   } else {
     return res.status(500).json({ error: result.error || "Failed to send test email" });

@@ -3,6 +3,8 @@ import { useSearchParams } from "react-router-dom";
 import { Activity } from "lucide-react";
 import { AlcoholStatus, statusColorClasses, formatAlcoholLevel, formatAlcoholPercentage } from "@/lib/alcohol";
 import { format } from "date-fns";
+import { apiUrl } from "@/lib/apiBase";
+import { Card } from "@/components/ui/card";
 
 interface PublicLog {
   device_id: string;
@@ -20,7 +22,7 @@ export default function PublicView() {
   useEffect(() => {
     async function fetchLogs() {
       try {
-        const url = new URL(`${import.meta.env.VITE_API_BASE_URL}/api/public/logs`);
+        const url = new URL(apiUrl("/api/public/logs"), window.location.origin);
         if (deviceParam) {
           url.searchParams.append("device", deviceParam);
         }
@@ -41,50 +43,55 @@ export default function PublicView() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center">
+      <div className="flex h-full min-h-0 items-center justify-center overflow-y-auto bg-background">
         <div className="text-center">
-          <Activity className="w-12 h-12 animate-spin text-blue-600 mx-auto mb-4" />
-          <p className="text-slate-600">Loading...</p>
+          <Activity className="mx-auto mb-3 h-10 w-10 animate-spin text-primary" />
+          <p className="text-sm text-muted-foreground">Loading…</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50">
-      <header className="bg-white/80 backdrop-blur-lg border-b border-indigo-100 shadow-sm sticky top-0 z-40">
-        <div className="container max-w-7xl flex items-center justify-between h-16 px-6">
-          <div className="flex items-center gap-3">
-            <img src="/logo.svg" alt="SoberWatch - IoT Alcohol Monitoring System" className="h-10 w-auto" />
-            <h1 className="text-lg font-semibold text-slate-900">Public Dashboard</h1>
+    <div className="flex h-full min-h-0 flex-col overflow-y-auto bg-background">
+      <header className="sticky top-0 z-40 border-b border-border bg-card/90 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-card/75">
+        <div className="container flex h-14 max-w-7xl items-center justify-between gap-4 px-4 sm:px-6">
+          <div className="flex min-w-0 items-center gap-3">
+            <img src="/logo.svg" alt="SoberWatch - IoT Alcohol Monitoring System" className="h-9 w-auto shrink-0" />
+            <div className="min-w-0">
+              <h1 className="truncate text-sm font-semibold tracking-tight text-foreground">Public view</h1>
+              <p className="text-xs text-muted-foreground">Read-only sensor feed</p>
+            </div>
           </div>
-          <div className="text-sm text-slate-500">
-            {deviceParam ? `Device: ${deviceParam}` : "All Devices"}
+          <div className="flex shrink-0 items-center gap-3">
+            <p className="text-xs text-muted-foreground sm:text-sm">
+              {deviceParam ? <span className="font-mono">{deviceParam}</span> : "All devices"}
+            </p>
           </div>
         </div>
       </header>
 
-      <main className="container max-w-7xl py-8 px-6">
-        <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-6 shadow-lg shadow-indigo-100/50 border border-indigo-100/50">
-          <div className="mb-6">
-            <h2 className="text-lg font-semibold text-slate-900 flex items-center gap-2">
-              <span className="w-8 h-8 rounded-lg bg-blue-100 flex items-center justify-center">
-                <Activity className="w-4 h-4 text-blue-600" />
-              </span>
-              Recent Alcohol Readings
-            </h2>
-            <p className="text-sm text-slate-500 ml-10">
-              {logs.length} {logs.length === 1 ? 'reading' : 'readings'} found
-            </p>
+      <main className="container max-w-3xl space-y-6 px-4 py-8 sm:px-6">
+        <Card className="p-6 shadow-sm">
+          <div className="mb-6 flex items-start gap-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border bg-muted/60 text-primary">
+              <Activity className="h-4 w-4" />
+            </div>
+            <div>
+              <h2 className="text-base font-semibold tracking-tight text-foreground">Recent readings</h2>
+              <p className="text-sm text-muted-foreground">
+                {logs.length} {logs.length === 1 ? "reading" : "readings"}
+              </p>
+            </div>
           </div>
 
           <div className="space-y-3">
             {logs.length === 0 ? (
-              <div className="text-center text-slate-400 py-12">
-                <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-slate-100 flex items-center justify-center">
-                  <Activity className="w-8 h-8 text-slate-400" />
+              <div className="py-12 text-center text-muted-foreground">
+                <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border bg-muted/50">
+                  <Activity className="h-7 w-7 opacity-50" />
                 </div>
-                <p className="font-medium">No readings available</p>
+                <p className="text-sm font-medium text-foreground">No readings available</p>
               </div>
             ) : (
               logs.map((log, index) => {
@@ -93,46 +100,56 @@ export default function PublicView() {
                 return (
                   <div
                     key={index}
-                    className={`rounded-xl p-5 border transition-all hover:shadow-lg ${
+                    className={`rounded-lg border p-4 transition-colors hover:bg-muted/30 ${
                       log.status === "DANGER"
-                        ? "bg-gradient-to-r from-red-50 to-red-100/50 border-red-200 shadow-md shadow-red-100/50"
+                        ? "border-destructive/30 bg-destructive/[0.04]"
                         : log.status === "WARNING"
-                        ? "bg-gradient-to-r from-orange-50 to-orange-100/50 border-orange-200 shadow-md shadow-orange-100/50"
-                        : "bg-gradient-to-r from-green-50 to-green-100/50 border-green-200 shadow-md shadow-green-100/50"
+                          ? "border-amber-500/25 bg-amber-500/[0.04]"
+                          : "border-border bg-card"
                     }`}
                   >
-                    <div className="flex items-start justify-between mb-3">
-                      <div className="flex-1">
-                        <div className="font-bold text-slate-900 text-lg">{log.device_id}</div>
-                        <div className="text-xs text-slate-500 mt-1 flex items-center gap-1">
-                          <Activity className="w-3 h-3" />
+                    <div className="mb-3 flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="text-base font-semibold text-foreground">{log.device_id}</div>
+                        <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
+                          <Activity className="h-3 w-3 shrink-0" />
                           {format(new Date(log.timestamp), "yyyy-MM-dd HH:mm:ss")}
                         </div>
                       </div>
-                      <div className={`px-3 py-1 rounded-full text-xs font-bold ${colors.badge}`}>
+                      <div className={`shrink-0 rounded-full px-2.5 py-1 text-xs font-semibold ${colors.badge}`}>
                         {log.status}
                       </div>
                     </div>
-                    
+
                     <div className="space-y-3">
-                      <div className="flex items-end justify-between">
+                      <div className="flex items-end justify-between gap-4">
                         <div>
-                          <div className="text-xs text-slate-500">Alcohol Level</div>
-                          <div className="text-2xl font-bold tabular-nums text-slate-900">
+                          <div className="text-xs text-muted-foreground">Alcohol level</div>
+                          <div className="text-xl font-semibold tabular-nums text-foreground">
                             {formatAlcoholLevel(log.alcohol_level)}
                           </div>
                         </div>
                         <div className="text-right">
-                          <div className="text-xs text-slate-500">Concentration</div>
-                          <div className="text-2xl font-bold tabular-nums" style={{ color: log.status === 'DANGER' ? '#dc2626' : log.status === 'WARNING' ? '#f97316' : '#16a34a' }}>
+                          <div className="text-xs text-muted-foreground">Concentration</div>
+                          <div
+                            className="text-xl font-semibold tabular-nums"
+                            style={{
+                              color:
+                                log.status === "DANGER"
+                                  ? "#dc2626"
+                                  : log.status === "WARNING"
+                                    ? "#f97316"
+                                    : "#16a34a",
+                            }}
+                          >
                             {formatAlcoholPercentage(log.alcohol_level)}
                           </div>
                         </div>
                       </div>
-                      
-                      <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden">
+
+                      <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
                         <div
-                          className={`h-2.5 rounded-full transition-all duration-500 ${colors.progress}`}
+                          className={`h-2 rounded-full transition-all duration-500 ${colors.progress}`}
                           style={{ width: `${Math.min(percentage, 100)}%` }}
                         />
                       </div>
@@ -142,7 +159,7 @@ export default function PublicView() {
               })
             )}
           </div>
-        </div>
+        </Card>
       </main>
     </div>
   );

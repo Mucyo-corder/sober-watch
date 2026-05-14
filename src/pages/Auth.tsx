@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Card } from "@/components/ui/card";
 import { toast } from "sonner";
 import { Loader2, QrCode } from "lucide-react";
+import { apiUrl } from "@/lib/apiBase";
 
 const schema = z.object({
   email: z.string().trim().email("Invalid email").max(255),
@@ -35,7 +36,7 @@ export default function Auth() {
     async function fetchQrCode() {
       setGeneratingQr(true);
       try {
-        const response = await fetch(`${import.meta.env.VITE_API_BASE_URL}/api/auth/qr/generate`, {
+        const response = await fetch(apiUrl("/api/auth/qr/generate"), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({}),
@@ -82,7 +83,7 @@ export default function Auth() {
   }
 
   return (
-    <main className="min-h-screen bg-gradient-hero flex items-center justify-center p-4">
+    <main className="relative flex h-full min-h-0 items-center justify-center overflow-y-auto bg-gradient-hero p-4">
       <div className="w-full max-w-md">
         <Link to="/" className="flex items-center justify-center mb-8">
           <img src="/logo.svg" alt="SoberWatch - IoT Alcohol Monitoring System" className="h-12 w-auto" />
@@ -109,9 +110,9 @@ export default function Auth() {
 
           {!useQrCode ? (
             <>
-              <h1 className="text-2xl font-bold mb-1">{isSignup ? "Create Admin Account" : "Sign in"}</h1>
+              <h1 className="text-2xl font-bold mb-1">{isSignup ? "Create account" : "Sign in"}</h1>
               <p className="text-sm text-muted-foreground mb-6">
-                {isSignup ? "Register a new administrator account" : "Access your monitoring dashboard"}
+                {isSignup ? "Register with your email — stored securely in the database" : "Access your monitoring dashboard"}
               </p>
 
               <form onSubmit={handleSubmit} className="space-y-4">
@@ -152,7 +153,7 @@ export default function Auth() {
                   onClick={() => setIsSignup(!isSignup)}
                   className="text-sm text-muted-foreground hover:text-foreground transition-colors"
                 >
-                  {isSignup ? "Already have an account? Sign in" : "Need an admin account? Sign up"}
+                  {isSignup ? "Already have an account? Sign in" : "New here? Create an account"}
                 </button>
               </div>
             </>
@@ -189,7 +190,7 @@ export default function Auth() {
         </Card>
 
         <p className="text-xs text-muted-foreground text-center mt-6 max-w-sm mx-auto">
-          Only administrator accounts can access the dashboard.
+          Sign in with the email and password you registered. QR login is available after at least one account exists.
         </p>
       </div>
     </main>
