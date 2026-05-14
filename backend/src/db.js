@@ -4,37 +4,54 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-dotenv.config({ path: join(__dirname, "../.env") });
+
+dotenv.config({
+  path: join(__dirname, "../.env"),
+});
 
 const { Pool } = pg;
+
+/* -------------------------------------------------------
+   Helpers
+------------------------------------------------------- */
 
 function firstNonEmpty(...vals) {
   for (const v of vals) {
     if (v === undefined || v === null) continue;
+
     const s = String(v).trim();
+
     if (s !== "") return s;
   }
+
   return "";
 }
 
-/** Build URI from discrete vars (matches Supabase “Connection pooling” UI: host, port, user, DB, password). */
 function buildDatabaseUrlFromParts() {
   const host = firstNonEmpty(process.env.DB_HOST);
-  const port = firstNonEmpty(process.env.DB_PORT, "5432");
-  const database = firstNonEmpty(process.env.DB_DATABASE, process.env.DB_NAME, "postgres");
-  const user = firstNonEmpty(process.env.DB_USERNAME, process.env.DB_USER, "postgres");
+
+  const port = firstNonEmpty(process.env.DB_PORT, "6543");
+
+  const database = firstNonEmpty(
+    process.env.DB_DATABASE,
+    process.env.DB_NAME,
+    "postgres"
+  );
+
+  // IMPORTANT FOR SUPABASE
+  // must be postgres.PROJECT_REF
+  const user = firstNonEmpty(
+    process.env.DB_USERNAME,
+    process.env.DB_USER
+  );
+
   const password = firstNonEmpty(process.env.DB_PASSWORD);
-  if (!host || !password) return "";
-  return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${encodeURIComponent(database)}`;
-}
 
-function isSupabaseHost(s) {
-  return /\bsupabase\.(com|co)\b/i.test(String(s || ""));
-}
+  if (!host || !user || !password) {
+    return "";
+  }
 
-/** Supabase transaction pooler (PgBouncer) — disable named prepared statements in node-pg. */
-function isSupabaseTransactionPooler(connectionString) {
-  return /pooler\.supabase\.com:6543\b/i.test(String(connectionString || ""));
+  return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${database}`;
 }
 
 function resolveConnectionString() {
@@ -46,85 +63,118 @@ function resolveConnectionString() {
   );
 }
 
+function isSupabase(connectionString) {
+  return /supabase\.com/i.test(connectionString || "");
+}
+
+function isTransactionPooler(connectionString) {
+  return /pooler\.supabase\.com:6543/i.test(connectionString || "");
+}
+
+/* -------------------------------------------------------
+   Pool Config
+------------------------------------------------------- */
+
 function getPoolConfig() {
   const connectionString = resolveConnectionString();
-  const host = firstNonEmpty(process.env.DB_HOST);
-  const port = Number(firstNonEmpty(process.env.DB_PORT, "5432")) || 5432;
 
-  const base = {
+  const baseConfig = {
     max: 10,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 15000,
   };
 
-  if (connectionString) {
-    const needsSsl =
-      /\bsupabase\.(com|co)\b/i.test(connectionString) ||
-      process.env.DB_SSL === "true" ||
-      (host && isSupabaseHost(host));
-    const txPooler = isSupabaseTransactionPooler(connectionString);
-    return {
-      ...base,
-      connectionString,
-      ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
-      ...(txPooler ? { prepareThreshold: 0 } : {}),
-    };
+  if (!connectionString) {
+    throw new Error(
+      "DATABASE_URL is missing. Please configure your database connection."
+    );
   }
 
-  return {
-    ...base,
-    host: host || "localhost",
-    port,
-    database: firstNonEmpty(process.env.DB_DATABASE, process.env.DB_NAME, "soberwatch"),
-    user: firstNonEmpty(process.env.DB_USERNAME, process.env.DB_USER, "postgres"),
-    password: firstNonEmpty(process.env.DB_PASSWORD, ""),
-    ssl: process.env.DB_SSL === "true" ? { rejectUnauthorized: false } : false,
+  const config = {
+    ...baseConfig,
+    connectionString,
+
+    // REQUIRED FOR SUPABASE
+    ssl: {
+      rejectUnauthorized: false,
+    },
   };
+
+  // IMPORTANT FOR SUPABASE TRANSACTION POOLER
+  if (isTransactionPooler(connectionString)) {
+    config.max = 1;
+
+    // disable prepared statements
+    config.statement_timeout = 30000;
+    config.query_timeout = 30000;
+
+    // IMPORTANT
+    config.keepAlive = true;
+  }
+
+  return config;
 }
+
+/* -------------------------------------------------------
+   Pool
+------------------------------------------------------- */
 
 export const pool = new Pool(getPoolConfig());
 
-pool.on("error", (err) => {
-  console.error("Unexpected error on idle client", err);
+pool.on("connect", () => {
+  console.log("✓ PostgreSQL connected successfully");
 });
 
-let didLogTarget = false;
-pool.on("connect", () => {
-  if (didLogTarget) return;
-  didLogTarget = true;
-  const cs = resolveConnectionString();
-  const label =
-    cs && /\bsupabase\.(com|co)\b/i.test(cs)
-      ? "Supabase PostgreSQL"
-      : cs
-        ? "PostgreSQL"
-        : "PostgreSQL";
-  console.log(`✓ Pool ready (${label})`);
+pool.on("error", (err) => {
+  console.error("Unexpected PostgreSQL error:", err);
 });
+
+/* -------------------------------------------------------
+   Test Connection
+------------------------------------------------------- */
 
 export async function testConnection(retries = 3, delayMs = 2000) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
+      console.log(
+        `Testing database connection (attempt ${attempt}/${retries})...`
+      );
+
       const result = await pool.query("SELECT NOW()");
-      console.log("✓ Database connection test successful:", result.rows[0]);
+
+      console.log(
+        "✓ Database connection successful:",
+        result.rows[0]
+      );
+
       return true;
     } catch (err) {
-      const isLastAttempt = attempt === retries;
       console.error(
-        `✗ Database connection test failed (attempt ${attempt}/${retries}): ${err.message}`
+        `✗ Connection failed (attempt ${attempt}/${retries}):`,
+        err.message
       );
-      if (!isLastAttempt) {
-        console.log(`  Retrying in ${delayMs}ms...`);
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+      if (attempt < retries) {
+        console.log(`Retrying in ${delayMs}ms...`);
+
+        await new Promise((resolve) =>
+          setTimeout(resolve, delayMs)
+        );
       }
     }
   }
+
   return false;
 }
+
+/* -------------------------------------------------------
+   Close Pool
+------------------------------------------------------- */
 
 export async function closePool() {
   try {
     await pool.end();
+
     console.log("✓ Database pool closed");
   } catch (err) {
     console.error("Error closing pool:", err);
