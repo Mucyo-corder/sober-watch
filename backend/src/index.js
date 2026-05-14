@@ -139,6 +139,36 @@ app.get("/health", (_req, res) => {
   res.json({ status: "OK" });
 });
 
+// DB + core tables (for Render / Supabase troubleshooting). Safe to call without auth.
+app.get("/api/health/db", async (_req, res) => {
+  try {
+    await pool.query("SELECT 1");
+    const tables = await pool.query(`
+      SELECT c.relname AS name
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relkind = 'r'
+        AND c.relname = ANY ($1::text[])
+      ORDER BY 1
+    `);
+    const found = new Set(tables.rows.map((r) => r.name));
+    const required = ["logs", "alerts", "alerts_history", "device_baselines", "notification_settings"];
+    const missing = required.filter((name) => !found.has(name));
+    if (missing.length > 0) {
+      return res.status(503).json({
+        ok: false,
+        error: "Schema incomplete",
+        missing,
+        hint: "From backend/: run npm run init-db with the same DATABASE_URL / DB_* as this service",
+      });
+    }
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("DB health error:", err);
+    return res.status(503).json({ ok: false, ...pgErrorPayload(err, "Database unreachable") });
+  }
+});
+
 // Server info for QR code (returns frontend URL on local network)
 app.get("/api/server-info", (_req, res) => {
   const clientOrigin = process.env.CLIENT_ORIGIN || "http://localhost:8080";
@@ -573,22 +603,27 @@ app.get("/api/reports/monthly", async (req, res) => {
 });
 
 app.get("/api/public/logs", async (req, res) => {
-  const { device } = req.query;
-  let query = `
+  try {
+    const { device } = req.query;
+    let query = `
     SELECT device_id, alcohol_level, status, timestamp
     FROM logs
   `;
-  let params = [];
-  
-  if (device) {
-    query += " WHERE device_id = $1";
-    params.push(device);
+    let params = [];
+
+    if (device) {
+      query += " WHERE device_id = $1";
+      params.push(device);
+    }
+
+    query += " ORDER BY timestamp DESC LIMIT 50";
+
+    const result = await pool.query(query, params);
+    return res.json(result.rows);
+  } catch (err) {
+    console.error("Get public logs error:", err);
+    return res.status(500).json(pgErrorPayload(err, "Failed to fetch public logs"));
   }
-  
-  query += " ORDER BY timestamp DESC LIMIT 50";
-  
-  const result = await pool.query(query, params);
-  return res.json(result.rows);
 });
 
 app.get("/api/alerts", async (req, res) => {
@@ -597,7 +632,6 @@ app.get("/api/alerts", async (req, res) => {
     let query = `
     SELECT id, log_id, device_id, alcohol_level, status, acknowledged, acknowledged_at, acknowledged_by, created_at
     FROM alerts
-    ORDER BY created_at DESC
   `;
     let params = [];
 
@@ -605,6 +639,8 @@ app.get("/api/alerts", async (req, res) => {
       query += " WHERE acknowledged = $1";
       params.push(acknowledged === "true");
     }
+
+    query += " ORDER BY created_at DESC";
 
     const result = await pool.query(query, params);
     return res.json(result.rows);
@@ -949,16 +985,17 @@ app.get("/api/notifications", async (_req, res) => {
   }
 });
 
-// "status" → email config; numeric segment → row by id (one route so "status" is never parsed as id).
-app.get("/api/notifications/:segment", async (req, res) => {
-  const segment = String(req.params.segment ?? "");
-  if (segment === "status") {
-    return res.json({ configured: isEmailConfigured() });
-  }
-  const id = Number.parseInt(segment, 10);
-  if (Number.isNaN(id)) {
+// Register before /api/notifications/:id — otherwise "status" is captured as :id (400 on older Express setups).
+app.get("/api/notifications/status", async (_req, res) => {
+  return res.json({ configured: isEmailConfigured() });
+});
+
+app.get("/api/notifications/:id", async (req, res) => {
+  const idStr = String(req.params.id ?? "");
+  if (!/^\d+$/.test(idStr)) {
     return res.status(404).json({ error: "Not found" });
   }
+  const id = Number.parseInt(idStr, 10);
   try {
     const result = await pool.query(
       `SELECT id, device_id, email, alert_types, enabled, created_at
@@ -1080,7 +1117,12 @@ app.use((err, _req, res, _next) => {
     return res.status(403).json({ error: "Not allowed by CORS" });
   }
   console.error(err);
-  return res.status(500).json({ error: "Internal server error" });
+  const payload = { error: "Internal server error" };
+  if (process.env.EXPOSE_ERROR_DETAILS === "true" || process.env.NODE_ENV !== "production") {
+    payload.detail = err?.message || String(err);
+    if (err?.code) payload.code = err.code;
+  }
+  return res.status(500).json(payload);
 });
 
 // Start server and test database connection
