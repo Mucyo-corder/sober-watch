@@ -985,7 +985,7 @@ app.get("/api/notifications", async (_req, res) => {
   }
 });
 
-// Register before /api/notifications/:id — otherwise "status" is captured as :id (400 on older Express setups).
+// Register before /api/notifications/:id — otherwise "status" is captured as :id (wrong handler; often 404).
 app.get("/api/notifications/status", async (_req, res) => {
   return res.json({ configured: isEmailConfigured() });
 });
