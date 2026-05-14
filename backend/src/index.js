@@ -99,6 +99,7 @@ const allowedOrigins = [
   "http://127.0.0.1:54670",
   "https://sober-watch.onrender.com",
   "https://frontend.onrender.com",
+  "https://frontend-9wly.onrender.com",
 ].filter(Boolean);
 
 function isAllowedCorsOrigin(origin) {
@@ -133,6 +134,7 @@ app.use(
     methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     optionsSuccessStatus: 204,
+    maxAge: 86_400,
   })
 );
 app.use(express.json());
